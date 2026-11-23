@@ -2349,6 +2349,8 @@ def domains_build(if_changed=False):
                    os.path.join(HOME, ".claude", "settings.json"),
                    # и личная часть карты плагинов: её окна направлений — в настройки окон
                    PLUGIN_MAP_LOCAL,
+                   # и ~/.config: новая папка ключей <проект>-dev закрывается окнам ближайшей сборкой (window_secret_extra)
+                   os.path.join(HOME, ".config"),
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пакеты направлений в данных пользователя: правка window.json или hooks.json — в окно (pack_window, снимок)
@@ -2445,10 +2447,11 @@ SANDBOX_STRICT = 2
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
-# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
-# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и запись в `gh issue` (любые
-# записи в GitHub) не выпускаются; из `gh pr`, `gh issue` и `gh run` — только чтение (`gh run cancel|rerun|delete`
-# падают). Голые формы — отдельно: шаблон «… *» их не покрывает (metis-0533: status и gh issue view|list добавлены)
+# Мимо песочницы: gh — только эти подкоманды; дописать тревогу. В песочнице gh без входа: Связка (KEYCHAIN_DIR в
+# WINDOW_SECRET_DIRS) окну закрыта, токена gh нет, и запись в GitHub отвечает 401 (metis-1333, К1: раньше Связка была
+# открыта, TLS с trustd работал, и gh api из песочницы писал в GitHub). Это и есть отказ (P0-4, metis-0064): `gh api`
+# и запись в `gh issue` не выпускаются; из `gh pr`, `gh issue` и `gh run` — только чтение (`gh run cancel|rerun|delete`
+# без входа падают). Голые формы — отдельно: шаблон «… *» их не покрывает (metis-0533: status и gh issue view|list)
 GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list", "status") for tail in ("", " *")]
 GH_ISSUE_READ = [f"gh issue {c}{tail}" for c in ("view", "list") for tail in ("", " *")]
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
@@ -2473,6 +2476,10 @@ WORKTREE_OUT = ["pantheon worktree add *", "pantheon worktree remove *"]
 # базе — прямое TCP. Мимо неё только migrate; прочий `pantheon supabase` — в песочнице. Файл, ветку по умолчанию origin
 # и SQL проверяет сама команда (lib/supabase_migrate.py), форму строки без цепочек — guard (supabase-migrate-cmd)
 SUPABASE_MIGRATE_OUT = ["pantheon supabase migrate *"]
+# PR пачки (metis-1333, К1): `pantheon batch pr` зовёт gh pr list|create|edit, а в песочнице gh без входа — мимо неё,
+# как `pantheon merge request`. Папку git и url origin проверяет сама команда (git_window в gitout.py, gh — с -R из
+# url), форму строки без цепочек — guard (batch-pr-cmd). `pantheon batch start` остаётся в песочнице
+BATCH_PR_OUT = ["pantheon batch pr *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -2491,7 +2498,8 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("",
 # Голого git мимо песочницы нет (metis-0972, вариант А владельца 20.11): git исполнял бы хуки, fsmonitor, sshCommand и
 # конфиг папки окна (gitfile, commondir, include) вне её. Мимо песочницы — только обёртка `pantheon git push|fetch`
 # (gitout.py: настоящая папка git, конфиг без опасных ключей, remote — github.com, хуков нет), голый git push|fetch
-# окна guard отказывает (правило git-out)
+# окна guard отказывает (правило git-out). С metis-1333 (К2, К13) ~/.ssh и SSH_AUTH_SOCK окну закрыты: ssh в песочнице
+# теперь не видит ни ключей, ни known_hosts — сеть git только через эту обёртку
 GIT_OUT = ["pantheon git push", "pantheon git push *", "pantheon git fetch", "pantheon git fetch *"]
 COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
@@ -2504,7 +2512,62 @@ OUTSIDE_KEY_DIRS = (os.path.join(STATE, "outside", "env"), os.path.join(STATE, "
 # Ключи демона Claude Code (metis-1026, К2): control.key и roster.json (rvAuth, ptyAuth) дают ввод в PTY любой сессии —
 # строку в owner-log от имени владельца. Окну роли не читать даже при открытом канале; реестр без ключей — снимок планового прохода
 DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")
-WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR)
+# Связка ключей пользователя (metis-1333, К1, план metis-1331 PR-1): в ней токен gh, и gh из песочницы с сетью писал
+# в GitHub. Закрыта всем окнам; gh, которому нужен вход, идёт мимо песочницы узкими командами (GH_PR_WRITE,
+# PANTHEON_MERGE_OUT, BATCH_PR_OUT, REVIEW_GH_OUT в window_rules.py). Проба 22.11: pnpm, npm, uv, supabase и curl Связку
+# в песочнице не читают; git credential-osxkeychain отдаёт пусто — git по https входит мимо песочницы (pantheon git)
+KEYCHAIN_DIR = os.path.join(HOME, "Library", "Keychains")
+# Прочие секреты владельца вне Связки (metis-1333, таблица К модели угроз argus 22.11):
+# окну с сетью их нечем унести, если окно их не читает. Папки (К2 ~/.ssh: ключ без пароля = push в любой repo через
+# github.com:22 — ssh в песочнице и так не входит, `pantheon git push|fetch` идёт мимо неё; К3 gh; К6 ~/.codex — у
+# codex-dev свой CODEX_HOME в STATE; К7 firebase; К8 rclone; К14 gnupg; ~/.zsh_sessions — история Terminal, как
+# ~/.zsh_history) — правилом «папка/**». STATE/codex-dev (вход Codex роли, auth.json) НЕ закрыт: `pantheon exec codex`
+# идёт в Bash окна (codex-dev, решение владельца 20.11 [codex-1272-window]), и Codex читает и обновляет вход там же —
+# denyRead остановил бы codex-dev. Закрыть — только вынеся запуск Codex из окна (отчёт metis-1333, вариант для владельца)
+SECRET_HOME_DIRS = (".ssh", ".config/gh", ".codex", ".config/configstore", ".config/rclone", ".gnupg", ".zsh_sessions")
+WINDOW_SECRET_DIRS = (CDP_TOKEN_DIR, *OUTSIDE_KEY_DIRS, DAEMON_DIR, KEYCHAIN_DIR,
+                      *(os.path.join(HOME, d) for d in SECRET_HOME_DIRS))
+# Ключи dev-стендов проектов (ревью metis-1333): ~/.config/<проект>-dev — age-ключ бэкапа, google-secret, auth-*.json.
+# Имени проекта в коде нет (репозиторий публичный, check-traces), поэтому два общих пути: правило по форме — каждая
+# папка ~/.config/*-dev, найденная при сборке окон, — и список установки [window_secrets] paths в policy.toml (папки и
+# файлы с ключами другой формы). Папка, заведённая после сборки, закрывается следующей сборкой (`pantheon domains build`)
+SECRET_CONFIG_SUFFIX = "-dev"
+# Секретные файлы (К4 netrc и помощники git, К5 токен реестра в ~/.npmrc, К9 история оболочки): правило «x/**» файл не
+# закрывает, поэтому у файла своя форма — сам путь и в denyRead, и в Read(…)
+WINDOW_SECRET_FILES = tuple(os.path.join(HOME, f) for f in (
+    ".netrc", ".git-credentials", ".config/git/credentials", ".npmrc", ".zsh_history", ".bash_history"))
+# Только инструментам Read, Grep, Glob (К11, К12): ~/.zshrc и ~/.claude.json хранят ключ context7, но Bash окна их
+# читает сам — снимок оболочки (PATH, alias) и `claude …` из песочницы; denyRead — после живой пробы
+WINDOW_READ_TOOL_FILES = tuple(os.path.join(HOME, f) for f in (".zshrc", ".claude.json"))
+# Переменные с ключами — окну пустыми (К10 ключ context7 из ~/.zshrc; К13 агент ssh — ключ без пароля, агент не нужен)
+WINDOW_SECRET_ENV = ("CONTEXT7_API_KEY", "SSH_AUTH_SOCK")
+
+
+def window_secret_extra(policy=None):
+    """→ (папки, файлы) секретов окна сверх постоянных списков: папки ~/.config/*-dev и [window_secrets] paths
+    policy.toml («~/…» или абсолютный путь, без «..»; не корень и не сама домашняя папка). Пути нет на диске — он и в
+    папках, и в файлах: правило Read своей формы есть у обоих. Негодная запись — строка в stderr, сборка идёт дальше."""
+    found = []
+    base = os.path.join(HOME, ".config")
+    with contextlib.suppress(OSError):
+        found += [os.path.join(base, n) for n in sorted(os.listdir(base))
+                  if n.endswith(SECRET_CONFIG_SUFFIX) and n != SECRET_CONFIG_SUFFIX and os.path.isdir(os.path.join(base, n))]
+    sec = policy.get("window_secrets") if isinstance(policy, dict) else None
+    raw = sec.get("paths") if isinstance(sec, dict) else None
+    bad = [] if raw is None or isinstance(raw, list) else [repr(raw)]
+    for x in raw if isinstance(raw, list) else []:
+        x = x.strip() if isinstance(x, str) else x
+        p = os.path.normpath(HOME + x[1:] if x.startswith("~/") else x) if isinstance(x, str) and x.startswith(("~/", "/")) \
+            and ".." not in x.split("/") else None
+        if p is None or p in ("/", HOME):
+            bad.append(repr(x))
+            continue
+        found.append(p)
+    if bad:
+        print(f"policy.toml [window_secrets] paths: не взято — {', '.join(bad)} (нужен список путей «~/…» или "
+              "абсолютных, без «..», не корень и не домашняя папка)", file=sys.stderr)
+    found = list(dict.fromkeys(found))
+    return tuple(p for p in found if not os.path.isfile(p)), tuple(p for p in found if not os.path.isdir(p))
 
 
 def _home_form(p):
@@ -3007,6 +3070,20 @@ def _under(p, top):
     return p == top or p.startswith(top.rstrip("/") + "/")
 
 
+def _read_rule(x, tail):
+    return f"Read({x}{tail})" if x.startswith("~") else f"Read(/{x}{tail})"
+
+
+def secret_read_rules(extra=((), ())):
+    """Правила Read для секретов окна (metis-1333): папке — «x/**», файлу — сам путь (правило «x/**» файл не закрывает);
+    каждое — и «~/…», и настоящим путём «//…». extra — (папки, файлы) из window_secret_extra."""
+    xd, xf = extra
+    dirs = [_read_rule(x, "/**") for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS + tuple(xd)])]
+    files = [_read_rule(x, "") for x in _deny_forms([_home_form(p) for p in
+                                                     WINDOW_SECRET_FILES + WINDOW_READ_TOOL_FILES + tuple(xf)])]
+    return dirs + files
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -3130,7 +3207,7 @@ def nested_pins(root):
 
 
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
-                  own_agents=False, tmp_own=()):
+                  own_agents=False, tmp_own=(), secrets=((), ())):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
@@ -3172,6 +3249,9 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "NEXT_TELEMETRY_DISABLED": "1",
             "TURBO_TELEMETRY_DISABLED": "1",
             "DO_NOT_TRACK": "1",
+            # ~/.npmrc окну закрыт (WINDOW_SECRET_FILES, К5): npm и pnpm берут пустой npmrc кэша окна, а не падают
+            "npm_config_userconfig": os.path.join(cache, "npmrc"),
+            **{k: "" for k in WINDOW_SECRET_ENV},
         },
         "sandbox": {
             "enabled": True,
@@ -3180,19 +3260,24 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             # macOS: доступ к com.apple.trustd — без него gh (Go, Security.framework), запущенный процессом в
             # песочнице (pantheon review accept), падает на x509 OSStatus -26276 (metis-1273, «да» владельца 20.11
             # «А — доступ к trustd»). Настройка Claude Code sandbox.enableWeakerNetworkIsolation; сеть и папки не шире.
-            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL)
+            # Окна без сети (hq, hestia, job-*) флаг снимают: trustd ходит наружу мимо прокси (AIA/OCSP/CRL).
+            # metis-1333: Связка закрыта, и gh шлюза идёт мимо песочницы (REVIEW_GH_OUT), но флаг оставлен — без него
+            # TLS Go-программ в песочнице (gh без входа на публичное, supabase) падал бы на x509; проба 22.11 снять его
+            # не могла (это настройка окна, а не команды) — проверка без флага отдельной задачей
             "enableWeakerNetworkIsolation": True,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_OUT if ssh else []),
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms(list(WINDOW_SECRET_DIRS)),
+                # secrets — ~/.config/*-dev и [window_secrets] policy.toml (window_secret_extra); путь без файла на
+                # диске — в обоих списках; дубли (и с папками окна) снимает dict.fromkeys, порядок прежний
+                "denyRead": list(dict.fromkeys(_deny_forms(deny_read) + list(NOTIFIER_PATHS) + _deny_forms(
+                    list(WINDOW_SECRET_DIRS) + list(WINDOW_SECRET_FILES) + list(secrets[0]) + list(secrets[1])))),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
-        # пароль демона CDP и ключи outside — и инструментам Read, Grep, Glob (песочница держит только Bash)
-        "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
-                                 for x in _deny_forms([_home_form(p) for p in WINDOW_SECRET_DIRS])]},
+        # пароль демона CDP, ключи outside и прочие секреты — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        "permissions": {"deny": secret_read_rules(secrets)},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
@@ -4553,6 +4638,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     private = private_conf(policy)
     private_paths = [p for p in private["paths"] if p.startswith("~/")]
     private_dirs = set(private["coordinators"])
+    secrets = window_secret_extra(policy)  # ~/.config/*-dev и [window_secrets] — каждому окну (metis-1333)
     caches = "~/Library/Caches/pantheon-sandbox"
     out_dir = path("settings")
     guard = guard_script()
@@ -4606,10 +4692,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
-                             guard, auto_allow, own_agents=direction)
+                             guard, auto_allow, own_agents=direction, secrets=secrets)
         if direction:
             data["sandbox"]["excludedCommands"] += (GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
-                                                    + SUPABASE_MIGRATE_OUT)
+                                                    + SUPABASE_MIGRATE_OUT + BATCH_PR_OUT)
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
@@ -4640,9 +4726,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                            "pantheon")
             else:
                 clear_once(f"pack-extra-{name}")
-            # metis-1279: пакет закрыл песочнице Связку — gh шлюза (review accept|delta) мимо неё (window_rules)
+            # metis-1279, metis-1333: Связка закрыта каждому окну (KEYCHAIN_DIR) — gh шлюза (review accept|delta) мимо
+            # песочницы у всех направлений (window_rules)
             ex = data["sandbox"]["excludedCommands"]
-            ex += WINDOW_RULES.review_gh_out(data["sandbox"].get("filesystem", {}).get("denyRead"), HOME, ex)
+            ex += WINDOW_RULES.review_gh_out(ex)
             pack_build_check(name)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> и ~/ai/life/<новое> — вне папок окна
@@ -4734,7 +4821,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       file=sys.stderr)
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         # тик запускает задачу в ~ (jobs.py, cwd=HOME): её папка в CLAUDE_TMP — «-<HOME>», без поддерева
-        job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME])
+        job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME], secrets=secrets)
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
         # окно без сети: trustd ходит наружу мимо прокси (AIA/OCSP/CRL) — канал выноса; флаг не даём (metis-1273)
@@ -4756,7 +4843,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
     # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
-    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard, WINDOW_RULES.consent_auto_allow())
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard, WINDOW_RULES.consent_auto_allow(),
+                       secrets=secrets)
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
     hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
     hs["sandbox"].pop("enableWeakerNetworkIsolation", None)  # trustd мимо прокси — не окну без сети (metis-1273)
@@ -4792,7 +4880,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
-    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard, WINDOW_RULES.consent_auto_allow())
+    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard, WINDOW_RULES.consent_auto_allow(),
+                       secrets=secrets)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:

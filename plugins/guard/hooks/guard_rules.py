@@ -70,6 +70,11 @@ PostToolUse (Bash:
   supabase-migrate-cmd — `pantheon supabase migrate` (мимо песочницы окна направления) — только строкой
                  `pantheon supabase migrate <файл> [--dry-run]`: путь относительный, из букв, цифр и . _ - /, без ..,
                  цепочек, кавычек, присваивания и обёрток (metis-1295); файл и SQL проверяет сама команда;
+  batch-pr-cmd — `pantheon batch pr` (мимо песочницы окна направления: Связка закрыта, gh в ней без входа) —
+                 только строкой `pantheon batch pr <story-id> [--dry-run]` без цепочек, кавычек, присваивания и
+                 обёрток (metis-1333); папку git и url origin проверяет сама команда (git_window);
+  review-delta-cmd — `pantheon review delta` (мимо песочницы окна направления) — только строкой
+                 `pantheon review delta <owner/repo> <PR>` без цепочек, кавычек, `..`, присваивания и обёрток (metis-1333);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -5078,6 +5083,83 @@ def check_supabase_migrate_cmd(event, tool, tool_input):
             "цифр и . _ - (/ между частями, без ..), без кавычек, `&&`, `;`, `|`, перенаправлений, подстановок, "
             "префикса присваивания и обёрток. Папка — отдельным `cd`.")
 
+
+# batch-pr-cmd (metis-1333, К1, план metis-1331 PR-1, consent metis-1332). Окну направления `pantheon batch pr` выпущен
+# мимо песочницы (excludedCommands, BATCH_PR_OUT в pantheon.py): Связка окну закрыта, и gh pr list|create|edit в ней
+# без входа. Папку git, конфиг и url origin проверяет сама команда (git_window в lib/gitout.py), guard держит форму
+# строки, как supabase-migrate-cmd: строка целиком `pantheon batch pr <story-id> [--dry-run]` (--dry-run и до номера),
+# номер — как BATCH_ID в lib/batch.py. Всё остальное — отказ: `&&`, `;`, `|`, `&`, перенаправления, подстановки,
+# кавычки, присваивание, обёртки, путь к пульту, лишние слова. `pantheon batch start` идёт в песочнице, правило его не трогает.
+_BATCH_ID = r"[a-z][a-z0-9-]{0,40}-[0-9]{4}"
+BATCH_PR_LINE = re.compile(r"[ \t]*pantheon[ \t]+batch[ \t]+pr[ \t]+(?:--dry-run[ \t]+" + _BATCH_ID
+                           + r"|" + _BATCH_ID + r"(?:[ \t]+--dry-run)?)[ \t]*\Z")
+BATCH_PR_RAW = re.compile(r"""\s*(?:[^\s]*/)?pantheon(?:\.py)?\s+batch\s+pr(?![A-Za-z0-9_-])""")
+
+
+def _batch_named(n, t):
+    """Команда — пульт со словами `batch pr` (сам пульт, через оболочку или python; обёртки разворачивает разбор)."""
+    w = _pantheon_words(n, t)
+    return w is not None and w[:2] == ["batch", "pr"]
+
+
+def check_batch_pr_cmd(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    norm = _wt_norm(cmd)
+    raw = any(BATCH_PR_RAW.match(ln) for ln in norm.splitlines() or [""])
+    if not raw:
+        targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        failed = not cmds and targets == [UNRESOLVED]
+        # слова пульта, batch и pr — разбор не понял строку (порядок проверок иной, чем у supabase-migrate-cmd: мутанты
+        # её теста ищут свою строку по всему файлу)
+        bwords = re.search(r"(?<![\w-])batch(?![\w-])", norm) and re.search(r"(?<![\w-])pr(?![\w-])", norm) \
+            and WORKTREE_WORDS.search(norm)
+        if not (failed and bwords) and not any(_batch_named(n, t) for n, t in cmds):
+            return None
+    if BATCH_PR_LINE.match(cmd):
+        return None
+    return ("Правило batch-pr-cmd: `pantheon batch pr` идёт мимо песочницы, поэтому только одной строкой "
+            "`pantheon batch pr <story-id> [--dry-run]` (metis-1333): без кавычек, `&&`, `;`, `|`, перенаправлений, "
+            "подстановок, префикса присваивания и обёрток. Папка — отдельным `cd` в копию ветки пачки.")
+
+
+# review-delta-cmd (metis-1333, Д argus). Окну направления `pantheon review delta` выпущен мимо песочницы (REVIEW_GH_OUT в
+# lib/window_rules.py): gh pr view в песочнице без входа, Связка закрыта. Формат аргументов команда проверяет сама
+# (REVIEW_REPO, REVIEW_PR в lib/review.py), guard держит форму строки, как batch-pr-cmd: строка целиком
+# `pantheon review delta <owner/repo> <PR>`. Всё остальное — отказ: цепочки, перенаправления, подстановки, кавычки,
+# присваивание, обёртки, путь к пульту, лишние слова, `..` в имени. Прочий `pantheon review` правило не трогает.
+_RD_REPO = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+REVIEW_DELTA_LINE = re.compile(r"[ \t]*pantheon[ \t]+review[ \t]+delta[ \t]+" + _RD_REPO + r"[ \t]+[1-9][0-9]{0,8}[ \t]*\Z")
+REVIEW_DELTA_RAW = re.compile(r"""\s*(?:[^\s]*/)?pantheon(?:\.py)?\s+review\s+delta(?![A-Za-z0-9_-])""")
+
+
+def _rdelta_named(n, t):
+    """Команда — пульт со словами `review delta` (сам пульт, через оболочку или python; обёртки разворачивает разбор)."""
+    w = _pantheon_words(n, t)
+    return w is not None and w[:2] == ["review", "delta"]
+
+
+def check_review_delta_cmd(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    norm = _wt_norm(cmd)
+    hit = any(REVIEW_DELTA_RAW.match(ln) for ln in norm.splitlines() or [""])
+    if not hit:
+        targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        broke = targets == [UNRESOLVED] and not cmds
+        # слова пульта, review и delta — разбор не понял строку
+        rwords = WORKTREE_WORDS.search(norm) and re.search(r"(?<![\w-])delta(?![\w-])", norm) \
+            and re.search(r"(?<![\w-])review(?![\w-])", norm)
+        if not (broke and rwords) and not any(_rdelta_named(n, t) for n, t in cmds):
+            return None
+    if REVIEW_DELTA_LINE.match(cmd) and ".." not in cmd:
+        return None
+    return ("Правило review-delta-cmd: `pantheon review delta` идёт мимо песочницы, поэтому только одной строкой "
+            "`pantheon review delta <owner/repo> <PR>` (metis-1333): без кавычек, `..`, `&&`, `;`, `|`, "
+            "перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd` в клон.")
+
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
 # EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
@@ -5249,6 +5331,8 @@ def check_window(event, tool, tool_input):
                         ("worktree-cmd", check_worktree_cmd),
                         ("git-out", check_git_out),
                         ("supabase-migrate-cmd", check_supabase_migrate_cmd),
+                        ("batch-pr-cmd", check_batch_pr_cmd),
+                        ("review-delta-cmd", check_review_delta_cmd),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:

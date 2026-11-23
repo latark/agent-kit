@@ -152,6 +152,9 @@ def task_new_notify(T, tid, direction, title, text):
 
 
 OVERLAP_GH_TIMEOUT = 30  # секунд на репозиторий: `task set status=doing` не должен висеть на сети
+# свежий кэш планового прохода — основной источник открытых PR (metis-1333, К1): в песочнице окна Связка закрыта,
+# и gh там без входа (401). Старше часа или с ошибкой по репозиторию — сначала gh, как у outside before_test
+OVERLAP_CACHE_FRESH = 3600
 
 
 def _merge_repos(direction):
@@ -198,10 +201,29 @@ def _one_line(text):
     return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())[:200]
 
 
+def _cache_rows(A, T, repo, rows):
+    """Строки кэша планового прохода по репозиторию → строки сверки (номер, ветка, файлы, id): чужой текст — по шаблону."""
+    out = []
+    for r in rows:
+        if isinstance(r, dict) and isinstance(r.get("number"), int) and isinstance(r.get("files"), list):
+            files, dropped = _pr_files(T, r["files"])
+            out.append({"repo": repo, "number": r["number"], "branch": str(r.get("branch") or ""),
+                        "files": files, "dropped": dropped,
+                        "ids": [i for i in r.get("ids") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)],
+                        "closes": [i for i in r.get("closes") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)]})
+    return out
+
+
+def _no_files(rows):
+    return [r.get("number") for r in rows if isinstance(r, dict) and not isinstance(r.get("files"), list)]
+
+
 def overlap_open_prs(direction):
-    """Открытые PR репозиториев направления с файлами (metis-0665) → (prs, notes). Сначала gh; не ответил — кэш
-    планового прохода autoclose-prs.json (open_prs с files и branch) и строка, что взят кэш и почему; нет и кэша —
-    строка «не проверено». Молча PR не пропускаются: notes уходят в вывод."""
+    """Открытые PR репозиториев направления с файлами (metis-0665) → (prs, notes). Сначала свежий (до
+    OVERLAP_CACHE_FRESH) кэш планового прохода autoclose-prs.json без ошибки по репозиторию (metis-1333: в песочнице
+    окна Связка закрыта, gh там без входа); PR кэша без списка файлов — строкой. Кэша нет, он старше или с ошибкой —
+    gh; не ответил — прежний кэш и строка, что взят кэш и почему; нет и его — строка «не проверено». Молча PR не
+    пропускаются: notes уходят в вывод."""
     A, T = P.autoclose_mod(), P.tasks_mod()
     repos, err = _merge_repos(direction)
     if not repos:
@@ -211,8 +233,20 @@ def overlap_open_prs(direction):
     cache = cache if isinstance(cache, dict) else {}  # кэш не словарь — как нет кэша
     cached = cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}
     fetched = cache.get("fetched")
+    fetched = fetched if isinstance(fetched, (int, float)) and not isinstance(fetched, bool) else None
+    errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
+    stale = cache.get("stale") if isinstance(cache.get("stale"), dict) else {}
     prs, notes = [], [err] if err else []
     for repo in repos:
+        rows = cached.get(repo.lower())
+        if (isinstance(rows, list) and fetched is not None and repo.lower() not in errs
+                and 0 <= P.now() - fetched <= OVERLAP_CACHE_FRESH):
+            nofiles = _no_files(rows)
+            if nofiles:
+                notes.append(f"{repo}: в кэше планового прохода без списка файлов: "
+                             + ", ".join("#" + str(n) for n in nofiles))
+            prs += _cache_rows(A, T, repo, rows)
+            continue
         data, gerr = A.gh_json(["pr", "list", "-R", repo, "--state", "open", "--limit", str(A.LIMIT), "--json",
                                 "number,headRefName,body,files"], env, timeout=OVERLAP_GH_TIMEOUT)
         if not gerr and isinstance(data, list):
@@ -222,13 +256,10 @@ def overlap_open_prs(direction):
                     prs.append(_pr_row(A, T, repo, pr, files, str(pr.get("headRefName") or "")))
             continue
         why = _one_line(gerr or "ответ gh — не список")
-        rows = cached.get(repo.lower())
-        if not isinstance(rows, list) or not isinstance(fetched, (int, float)):
+        if not isinstance(rows, list) or fetched is None:
             notes.append(f"{repo}: gh не ответил ({why}), кэша планового прохода нет — проверь вручную: "
                          f"gh pr list -R {repo} --state open --json number,headRefName,files")
             continue
-        errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
-        stale = cache.get("stale") if isinstance(cache.get("stale"), dict) else {}
         at = fetched
         if repo.lower() in errs:  # metis-0808: по репозиторию строки прежние, время — последнего успеха, не нынешнего прохода
             at = stale.get(repo.lower(), fetched)
@@ -237,16 +268,10 @@ def overlap_open_prs(direction):
                              f"проверь вручную: gh pr list -R {repo} --state open --json number,headRefName,files")
                 continue
         when = P.datetime.fromtimestamp(at).strftime("%d.%m %H:%M")
-        nofiles = [r.get("number") for r in rows if isinstance(r, dict) and not isinstance(r.get("files"), list)]
+        nofiles = _no_files(rows)
         notes.append(f"{repo}: gh не ответил ({why}) — открытые PR из кэша планового прохода от {when}"
                      + (f"; без списка файлов: {', '.join('#' + str(n) for n in nofiles)}" if nofiles else ""))
-        for r in rows:
-            if isinstance(r, dict) and isinstance(r.get("number"), int) and isinstance(r.get("files"), list):
-                files, dropped = _pr_files(T, r["files"])
-                prs.append({"repo": repo, "number": r["number"], "branch": str(r.get("branch") or ""),
-                            "files": files, "dropped": dropped,
-                            "ids": [i for i in r.get("ids") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)],
-                            "closes": [i for i in r.get("closes") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)]})
+        prs += _cache_rows(A, T, repo, rows)
     return prs, notes
 
 

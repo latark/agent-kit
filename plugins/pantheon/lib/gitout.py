@@ -25,6 +25,12 @@
   без GIT_* (кроме GIT_AUTHOR_*/GIT_COMMITTER_* NAME, EMAIL, DATE), XDG_CONFIG_HOME, PAGER и SSH_ASKPASS, с фиксированным PATH, GIT_CONFIG_NOSYSTEM=1,
   GIT_NO_REPLACE_OBJECTS=1 и GIT_TERMINAL_PROMPT=0. Глобальный ~/.gitconfig читается (вход gh для github.com).
 
+git_window — тот же проверенный git для `pantheon batch pr` (metis-1333): она идёт мимо песочницы, потому что в окне
+Связка закрыта и gh там без входа; папка, конфиг и remote origin проверяются, как у fetch, git — с теми же флагами и
+окружением, а репозиторий для gh (`-R`) — из проверенного url origin. Этот «владелец/репозиторий» должен стоять в
+[merge_repos] policy.toml: в окне направления — у своего направления, без окна — у любого; policy.toml не прочитан —
+отказ.
+
 git_hard — тот же git без хуков для ~/ai/pantheon (P.git: archive.py commit, pull и push идут мимо песочницы из
 `pantheon commit`): папка .git — настоящая, окружение и флаги те же, но системный конфиг и фильтры читаются (вход
 osxkeychain, git-crypt), а протоколы не сужаются.
@@ -38,7 +44,7 @@ import re
 import subprocess
 import sys
 
-__all__ = ["git_cmd", "git_hard"]
+__all__ = ["git_cmd", "git_hard", "git_window"]
 
 GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 HARD = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh", "-c", "core.pager=cat", "-c", "submodule.recurse=false"]
@@ -199,6 +205,45 @@ def git_cmd(rest, cwd=None):
     cmd = ["git", "--no-replace-objects", f"--git-dir={gitdir}", f"--work-tree={wt}", *HARD, *NET, sub,
            "--no-recurse-submodules", *(["--no-verify"] if sub == "push" else []), remote, *specs]
     return subprocess.run(cmd, cwd=wt, env=_env()).returncode
+
+
+def _slug_refuse(slug):
+    """Причина отказа или None (metis-1333, Д2 argus): origin — репозиторий из [merge_repos] policy.toml; в окне
+    направления (PANTHEON_WINDOW есть в domains.json) — своего направления, без окна — любого. Иначе gh мимо песочницы
+    открыл бы PR в чужом репозитории. policy.toml не прочитан — отказ."""
+    try:
+        dirs = P.merge_mod().repo_dirs().get(slug.lower()) or set()
+    except (OSError, ValueError) as e:
+        return f"policy.toml не прочитан ({type(e).__name__}) — чей репозиторий {slug}, не знаю"
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    doms = (P.read_json(P.path("domains.json"), {}) or {}).get("domains") or {}
+    mine = win if win and isinstance(doms, dict) and isinstance(doms.get(win), list) else ""
+    if not dirs or (mine and mine not in dirs):
+        return (f"origin {slug} — не репозиторий " + (f"направления {mine}" if mine else "направлений")
+                + " из [merge_repos] policy.toml: PR только в своём репозитории")
+    return None
+
+
+def git_window(cwd, remote="origin"):
+    """git папки окна мимо песочницы (pantheon batch pr, metis-1333): (run, «владелец/репозиторий» remote, None) или
+    (None, None, причина). run(args) — git с проверенной папкой, без хуков, конфига системы и GIT_* окна."""
+    try:
+        repo, gitdir, common, wt = _where(cwd)
+        P.wt_own(repo)  # своя копия, как у pantheon git (мутанты test_gitout держат строку push отдельно)
+        _check_repo(common, gitdir, remote, False)
+    except (Refuse, P.WtRefuse) as e:
+        return None, None, str(e)
+    url = next(v for k, v in _config(common) if k == f"remote.{remote.lower()}.url")
+    slug = re.sub(r"^(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)", "", url).rstrip("/")
+    slug = slug[:-4] if slug.endswith(".git") else slug
+    why = _slug_refuse(slug)
+    if why:
+        return None, None, why
+
+    def run(args):
+        cmd = ["git", "--no-replace-objects", "--git-dir=" + gitdir, "--work-tree=" + wt, *HARD, *NET, *args]
+        return subprocess.run(cmd, cwd=wt, env=_env(), capture_output=True, text=True)
+    return run, slug, None
 
 
 def git_hard(repo, args, check=True):
