@@ -81,6 +81,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
                                         batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
                                         pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
+  pantheon pr create|edit|comment|ready [<N|ветка>] [флаги gh]   свой PR окна мимо песочницы (lib/pr_out.py,
+                                        metis-1334): репозиторий — origin своей папки, ветка не базовая, текст — из
+                                        временной папки или своей копии; одной командой в строке (guard pr-cmd)
   pantheon worktree add <имя> [--branch B | --detach] [--base REF] | remove <имя> [--force] | list   worktree репозитория текущей папки
                                         в .claude/worktrees/<имя> (lib/worktree.py, metis-1225): окну направления мимо
                                         песочницы — только add и remove, одной командой в строке (guard worktree-cmd)
@@ -2480,6 +2483,9 @@ SUPABASE_MIGRATE_OUT = ["pantheon supabase migrate *"]
 # как `pantheon merge request`. Папку git и url origin проверяет сама команда (git_window в gitout.py, gh — с -R из
 # url), форму строки без цепочек — guard (batch-pr-cmd). `pantheon batch start` остаётся в песочнице
 BATCH_PR_OUT = ["pantheon batch pr *"]
+# свой PR окна (metis-1334, план metis-1331 PR-2a): `pantheon pr create|edit|comment|ready` — gh мимо песочницы; проверки
+# gh-out делает сама команда (lib/pr_out.py), форму строки без цепочек — guard (pr-cmd)
+PR_OUT = ["pantheon pr *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
@@ -4695,7 +4701,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                              guard, auto_allow, own_agents=direction, secrets=secrets)
         if direction:
             data["sandbox"]["excludedCommands"] += (GH_PR_WRITE + PANTHEON_MERGE_OUT + WORKTREE_OUT
-                                                    + SUPABASE_MIGRATE_OUT + BATCH_PR_OUT)
+                                                    + SUPABASE_MIGRATE_OUT + BATCH_PR_OUT + PR_OUT)
             # папки направления — рабочие папки окна (metis-0911, решение Зевса 06.11): cd в репозиторий своего
             # направления сохраняется, и EnterWorktree в его .claude/worktrees/ Claude Code пускает без вопроса
             # владельцу. Чужие направления сюда не попадают; EnterWorktree туда закрывает guard (worktree-own)
@@ -9983,6 +9989,7 @@ _attach("quarantine")
 _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
+_attach("pr_out")         # свой PR окна мимо песочницы — pantheon pr create|edit|comment|ready (metis-1334)
 _attach("batch")
 _attach("tasknote")       # заметка в карточку чужого направления из окна роли — заявкой (metis-1187)
 _attach("worktree")       # worktree окна направления мимо песочницы — одна узкая команда (metis-1225)
@@ -10170,6 +10177,8 @@ def main(argv):
         return config_edit_mod().main(rest)
     if cmd == "batch":
         return batch_cmd(rest)
+    if cmd == "pr":
+        return pr_cmd(rest)
     if cmd == "worktree":
         return worktree_cmd(rest)
     if cmd == "git":

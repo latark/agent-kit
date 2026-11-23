@@ -87,15 +87,16 @@ open(os.path.join(bindir, "gh"), "w").write(
     "echo https://github.com/x/y/pull/9\n")
 os.chmod(os.path.join(bindir, "gh"), 0o755)
 
-# metis-1333: gh мимо песочницы ищется по GH_PATH, а не по PATH окна. Копия lib, где GH_PATH — папка поддельного gh;
+# metis-1333: gh мимо песочницы ищется по GH_PATH, а не по PATH окна. GH_PATH — в pr_out.py: batch pr ходит через
+# него (metis-1334). Копия lib, где GH_PATH — папка поддельного gh;
 # PATH окна (env ниже) другой, и gh.path показывает, какой из них дошёл до gh.
 GH_FIXED = 'GH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"'
 GH_TEST_PATH = f"{bindir}:/usr/bin:/bin"
-_bsrc = open(os.path.join(LIB, "batch.py"), encoding="utf-8").read()
-check("batch.py: GH_PATH — постоянная строка, одна (как GIT_PATH в gitout)", _bsrc.count(GH_FIXED) == 1)
+_bsrc = open(os.path.join(LIB, "pr_out.py"), encoding="utf-8").read()
+check("pr_out.py: GH_PATH — постоянная строка, одна (как GIT_PATH в gitout)", _bsrc.count(GH_FIXED) == 1)
 GHLIB = os.path.join(_ROOT, "ghlib")
 shutil.copytree(LIB, GHLIB, ignore=shutil.ignore_patterns("__pycache__"))
-open(os.path.join(GHLIB, "batch.py"), "w", encoding="utf-8").write(_bsrc.replace(GH_FIXED, f'GH_PATH = "{GH_TEST_PATH}"'))
+open(os.path.join(GHLIB, "pr_out.py"), "w", encoding="utf-8").write(_bsrc.replace(GH_FIXED, f'GH_PATH = "{GH_TEST_PATH}"'))
 RUN_PY = os.path.join(GHLIB, "run.py")
 # [merge_repos] policy.toml: git_window пускает только origin репозитория направления (Д2 argus)
 os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
@@ -199,15 +200,15 @@ calls = gh_calls()
 create = [c for c in calls if c[:2] == ["pr", "create"]]
 check("pr: сначала gh pr list по ветке, затем create --base main --head batch/metis-0900",
       r.returncode == 0 and len(calls) == 2 and calls[0][:4] == ["pr", "list", "--head", "batch/metis-0900"]
-      and len(create) == 1 and create[0][2:7] == ["--base", "main", "--head", "batch/metis-0900", "--title"], str(calls))
-check("pr: gh получает -R x/y из проверенного url origin (metis-1333), а не из папки",
-      bool(create) and create[0][-2:] == ["-R", "x/y"] and calls[0][-2:] == ["-R", "x/y"], str(calls))
+      and len(create) == 1 and create[0][2:4] == ["--base=main", "--head=batch/metis-0900"], str(calls))
+check("pr: gh получает репозиторий x/y из проверенного url origin (metis-1333), а не из папки; create — через pr_out",
+      bool(create) and create[0][-1] == "--repo=x/y" and calls[0][-2:] == ["-R", "x/y"], str(calls))
 _ghp = open(os.path.join(tmp, "gh.path")).read() if os.path.exists(os.path.join(tmp, "gh.path")) else None
 check("pr: gh получает PATH из GH_PATH, а не PATH окна (откат env[\"PATH\"] = GH_PATH — тест красный)",
       _ghp == GH_TEST_PATH and env["PATH"] != GH_TEST_PATH, repr(_ghp))
 check("влитая ветка metis-0902-… засчитана: Closes на обе",
-      bool(create) and create[0][7].startswith("Пачка metis-0900") and create[0][8] == "--body"
-      and "Closes metis-0901, metis-0902" in create[0][9] and "не вошли" not in create[0][9].lower(), str(create))
+      bool(create) and create[0][4].startswith("--title=Пачка metis-0900") and create[0][5].startswith("--body=")
+      and "Closes metis-0901, metis-0902" in create[0][5] and "не вошли" not in create[0][5].lower(), str(create))
 check("pr: ссылка gh в выводе", "pull/9" in r.stdout, r.stdout)
 check("pr: в карточке пачки pr = x/y#9 и branch, строка «PR пачки» в журнале",
       story_head().get("pr") == "x/y#9" and story_head().get("branch") == "batch/metis-0900"
@@ -219,9 +220,10 @@ open(openpr, "w").write("17\n")
 r = cli(wt, "batch", "pr", "metis-0900")
 calls = gh_calls()
 check("повтор при открытом PR → gh pr edit 17 с новым телом, create нет",
-      r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-1] for c in calls)
+      r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-2] for c in calls)
       and not any(c[:2] == ["pr", "create"] for c in calls), str(calls))
-check("повтор: gh pr edit 17 -R x/y", any(c[:5] == ["pr", "edit", "17", "-R", "x/y"] for c in calls), str(calls))
+check("повтор: gh pr edit 17 --repo=x/y", any(c[:3] == ["pr", "edit", "17"] and c[-1] == "--repo=x/y" for c in calls),
+      str(calls))
 check("повтор: pr пачки — открытый PR 17 (x/y#17)", story_head().get("pr") == "x/y#17", str(story_head()))
 
 # коммит «часть <id>» — задача сделана не вся: Closes ей нет, в теле нет слова «часть» (autoclose снял бы весь PR)
