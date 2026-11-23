@@ -11,9 +11,10 @@ review, а не в done; в stderr — «<id>: неотмечено N», стр�
 `pantheon batch pr` идёт мимо песочницы окна (excludedCommands, BATCH_PR_OUT в pantheon.py, metis-1333): в окне
 Связка закрыта, и gh там без входа. Поэтому git зовётся через git_window (gitout.py): папка git настоящая, репозиторий
 своего направления, в конфиге нет ключей, которыми git исполнил бы код, url origin — только github.com; без хуков и
-GIT_* окна; репозиторий origin — из [merge_repos] policy.toml своего направления. gh получает
-`-R <владелец/репозиторий>` из проверенного url origin, а не из папки, окружение без GH_REPO, GH_HOST, GH_CONFIG_DIR и
-XDG_CONFIG_HOME и постоянный PATH (GH_PATH), а не PATH окна. Форму строки в окне проверяет guard (правило batch-pr-cmd).
+GIT_* окна; репозиторий origin — из [merge_repos] policy.toml своего направления. gh зовётся через pr_out.py
+(metis-1334): `gh pr list` — gh_read, create и edit — pr_write с проверками `pantheon pr` (репозиторий — только origin
+своей папки, ветка не базовая, окно без личного); окружение без GH_*, GIT_* окна и XDG_CONFIG_HOME и постоянный PATH
+(GH_PATH в pr_out.py), а не PATH окна. Форму строки в окне проверяет guard (правило batch-pr-cmd).
 Шлюз guard проверяет PR пачки как любой другой: с metis-1050 годится и узкая запись тестов (--affected), полный набор идёт ночью на main.
 Карточка пачки помнит ветку и PR (поля branch и pr, tasks.FIELDS): start пишет branch, pr — branch и pr
 («владелец/репозиторий#N» по ссылке, которую печатает gh). По ним карточка пачки и board-auto показывают PR пачки.
@@ -209,10 +210,6 @@ def _start(sid, cwd, head=None):
     return 0
 
 
-GH_ENV_DROP = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")  # gh мимо песочницы: репозиторий и вход — не из окна
-GH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # gh мимо песочницы — не из PATH окна (как GIT_PATH в gitout)
-
-
 def _pr(sid, tasks, cwd, dry):
     br = batch_branch(sid)
     git, repo, why = P.git_window(cwd)
@@ -231,21 +228,22 @@ def _pr(sid, tasks, cwd, dry):
     if dry:
         print(title + "\n\n" + body, end="")
         return 0
-    env = {k: v for k, v in os.environ.items() if k not in GH_ENV_DROP}
-    env["PATH"] = GH_PATH
-    have = subprocess.run(["gh", "pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number",
-                           "-R", repo],
-                          cwd=cwd, env=env, capture_output=True, text=True)
+    have = P.gh_read(["pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number",
+                      "-R", repo], cwd)
     if have.returncode != 0:
         print(f"pantheon batch pr: gh pr list не прошёл: {have.stderr.strip()[:300]}", file=sys.stderr)
         return 1
     num = have.stdout.strip()
-    if num.isdigit():
-        argv = ["gh", "pr", "edit", num, "-R", repo, "--title", title, "--body", body]
-    else:
-        argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body, "-R", repo]
-    r = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
-    print(r.stdout, end="")
+    try:  # запись — через проверки pantheon pr (pr_out.py, metis-1334): -R, ветка, окно с личным
+        if num.isdigit():
+            r = P.pr_write("edit", [num, "-R", repo, "--title", title, "--body", body], cwd, capture=True)
+        else:
+            r = P.pr_write("create", ["--base", BASE, "--head", br, "--title", title, "--body", body, "-R", repo], cwd,
+                           capture=True)
+    except P.PrRefuse as e:
+        print(f"pantheon batch pr: {e}", file=sys.stderr)
+        return 2
+    print(r.stdout or "", end="")
     if r.returncode != 0:
         return r.returncode
     m = PR_URL.search(r.stdout or "")

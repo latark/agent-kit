@@ -660,7 +660,19 @@ answer и плановый проход, это скрипты, guard их не 
 - **batch-pr-cmd (metis-1333).** `pantheon batch pr` идёт мимо песочницы, поэтому guard пускает только строку целиком
   `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
   отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём. `git_window` пускает только origin из [merge_repos]
-  policy.toml своего направления, а gh зовётся с постоянным PATH (`GH_PATH` в lib/batch.py), не с PATH окна.
+  policy.toml своего направления, а gh зовётся с постоянным PATH (`GH_PATH` в lib/pr_out.py), не с PATH окна. Запись
+  PR (create, edit) идёт через проверки `pantheon pr` (pr_out.py, metis-1334).
+- **pr-cmd (metis-1334, план metis-1331 PR-2a).** `pantheon pr create|edit|comment|ready` (`PR_OUT` в pantheon.py)
+  окна направлений идёт мимо песочницы: так окно открывает и правит свой PR, хотя gh в песочнице без входа. Проверки
+  gh-out (Д2 плана) делает сама команда, lib/pr_out.py: без GH_* в окружении; флаги только из таблицы формы подкоманды
+  (без --hostname, --editor, --web); позиционный — номер PR или ветка, не адрес; --body-file — только из временных
+  папок и своей копии, не из личного и не из .git, его текст читает команда и отдаёт gh как --body; репозиторий — из
+  проверенного url origin своей папки (`git_window`), -R — только он же; окну с личным — отказ; ветка PR не main, master
+  и не --base. gh получает флаги в форме `--флаг=значение`, окружение без GH_*, GIT_* окна, EDITOR, VISUAL, BROWSER,
+  PAGER, XDG_CONFIG_HOME и PATH = GH_PATH. guard держит только форму строки: строка целиком `pantheon pr <подкоманда>`
+  и слова из букв, цифр, `. _ / : = @ + , % -` или строки в кавычках; цепочки, `&`, перенаправления, подстановки,
+  присваивание, обёртки, путь к пульту, `#` и шаблоны — отказ. Тесты — tests/test_merge_gate_gh.py (t_pr_cmd) и
+  plugins/pantheon/tests/test_pr_out.py, мутанты в них. close, reopen и update-branch — не здесь (PR-2b).
 - **review-delta-cmd (metis-1333).** `pantheon review delta` тоже идёт мимо песочницы, поэтому guard пускает только
   строку целиком `pantheon review delta <владелец/репозиторий> <PR>`: цепочки, подстановки, кавычки, `..`, лишние
   слова и флаги, присваивания, обёртки и путь к пульту — отказ. Прочий `pantheon review` правило не трогает. Тест —

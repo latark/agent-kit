@@ -213,13 +213,13 @@ def keychain_gate(check, tmp, env, load):
     secret_extra(check, env, load)
     exc = lambda n: sb[n].get("excludedCommands") or []  # noqa: E731
     dirs = [n for n in ("metis-pantheon", "athena-shop", "mnemo-brain") if n in sb]
-    check("окна направлений (и без пакета): pantheon review accept|delta и batch pr мимо песочницы, report — нет "
-          "(metis-1279, metis-1333)",
-          len(dirs) == 3 and all(c in exc(n) for n in dirs for c in gate_out + ["pantheon batch pr *"])
+    check("окна направлений (и без пакета): pantheon review accept|delta, batch pr и pr мимо песочницы, report — нет "
+          "(metis-1279, metis-1333, metis-1334)",
+          len(dirs) == 3 and all(c in exc(n) for n in dirs for c in gate_out + ["pantheon batch pr *", "pantheon pr *"])
           and not any("review report" in c or "batch start" in c for n in dirs for c in exc(n)),
           [exc(n) for n in dirs])
     check("мастерская: review accept|delta и batch pr остаются в песочнице (metis-1333)",
-          not any(c.startswith(("pantheon review", "pantheon batch")) for c in exc("workshop")), exc("workshop"))
+          not any(c.startswith(("pantheon review", "pantheon batch", "pantheon pr")) for c in exc("workshop")), exc("workshop"))
     kc_probe = f"""
 import json, sys
 sys.path.insert(0, {os.path.dirname(LIB)!r})

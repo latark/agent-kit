@@ -75,6 +75,9 @@ PostToolUse (Bash:
                  обёрток (metis-1333); папку git и url origin проверяет сама команда (git_window);
   review-delta-cmd — `pantheon review delta` (мимо песочницы окна направления) — только строкой
                  `pantheon review delta <owner/repo> <PR>` без цепочек, кавычек, `..`, присваивания и обёрток (metis-1333);
+  pr-cmd       — `pantheon pr create|edit|comment|ready` (мимо песочницы окна направления) — только строкой целиком без
+                 цепочек, подстановок, присваивания и обёрток, текст — в кавычках (metis-1334); репозиторий, флаги,
+                 --body-file и окно с личным проверяет сама команда (lib/pr_out.py пантеона);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -5160,6 +5163,44 @@ def check_review_delta_cmd(event, tool, tool_input):
             "`pantheon review delta <owner/repo> <PR>` (metis-1333): без кавычек, `..`, `&&`, `;`, `|`, "
             "перенаправлений, подстановок, префикса присваивания и обёрток. Папка — отдельным `cd` в клон.")
 
+
+# pr-cmd (metis-1334, план metis-1331 PR-2a). Окну направления `pantheon pr create|edit|comment|ready` выпущен мимо
+# песочницы (PR_OUT в pantheon.py): проверки gh-out — репозиторий, флаги, --body-file, окно с личным, ветка — делает
+# сама команда (lib/pr_out.py). guard держит только форму строки (пункт 9 Д2): строка целиком начинается словом
+# `pantheon pr <подкоманда>`, дальше — слова из букв, цифр и . _ / : = @ + , % - или строки в кавычках ('…' — что угодно
+# без ', "…" — без $ ` \ ! "). Цепочки, `&`, перенаправления, подстановки, присваивание, обёртки (env -S и прочие),
+# путь к пульту, комментарий # и шаблоны — отказ. Кавычки нужны заголовку; разбор Bash правило не наращивает.
+_PR_WORD = r"""(?:[\w./:=@+,%-]++|'[^']*+'|"[^"$`\\!]*+")++"""  # possessive: без перебора с возвратом
+PR_LINE = re.compile(r"[ \t]*pantheon[ \t]+pr[ \t]+(?:create|edit|comment|ready)(?:[ \t]+" + _PR_WORD + r")*[ \t]*\Z")
+PR_RAW = re.compile(r"""\s*(?:[^\s]*/)?pantheon(?:\.py)?\s+pr(?![A-Za-z0-9_-])""")
+
+
+def _pr_named(n, t):
+    """Команда — пульт с первым словом pr (сам пульт, через оболочку или python; обёртки разворачивает разбор)."""
+    w = _pantheon_words(n, t)
+    return w is not None and w[:1] == ["pr"]
+
+
+def check_pr_cmd(event, tool, tool_input):
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    norm = _wt_norm(cmd)
+    hit = any(PR_RAW.match(ln) for ln in norm.splitlines() or [""])
+    if not hit:
+        targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+        pbroke = targets == [UNRESOLVED] and not cmds
+        pwords = WORKTREE_WORDS.search(norm) and re.search(r"(?<![\w-])pr(?![\w-])", norm)
+        if not (pbroke and pwords) and not any(_pr_named(n, t) for n, t in cmds):
+            return None
+    if PR_LINE.match(cmd):
+        return None
+    return ("Правило pr-cmd: `pantheon pr` идёт мимо песочницы, поэтому только одной строкой "
+            "`pantheon pr create|edit|comment|ready [<N|ветка>] [флаги]` (metis-1334): без `&&`, `;`, `|`, `&`, "
+            "перенаправлений, подстановок ($, обратные кавычки), префикса присваивания и обёрток; текст с пробелами — "
+            "в кавычках, длинный — файлом --body-file. Папка — отдельным `cd` в свою копию.")
+
+
 # worktree-own (metis-0911, решение Зевса 06.11): окно направления (PANTHEON_WINDOW — имя из domains.json) входит
 # EnterWorktree с path только в .claude/worktrees/ репозиториев своего направления. Claude Code спрашивает владельца
 # («permission-root relocation … outside .claude/worktrees/», 2.1.318) на любой path вне .claude/worktrees/ репозитория
@@ -5333,6 +5374,7 @@ def check_window(event, tool, tool_input):
                         ("supabase-migrate-cmd", check_supabase_migrate_cmd),
                         ("batch-pr-cmd", check_batch_pr_cmd),
                         ("review-delta-cmd", check_review_delta_cmd),
+                        ("pr-cmd", check_pr_cmd),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
