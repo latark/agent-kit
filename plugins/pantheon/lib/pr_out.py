@@ -1,6 +1,8 @@
-"""Пантеон: `pantheon pr create|edit|comment|ready` — gh pr мимо песочницы окна (metis-1334, план metis-1331 PR-2a).
+"""Пантеон: `pantheon pr create|edit|comment|ready|close|reopen|update-branch` — gh pr мимо песочницы окна
+(metis-1334, план metis-1331 PR-2a; close, reopen, update-branch — metis-1335, PR-2b).
 
-В окне Связка закрыта, и gh там без входа (metis-1333). Окно открывает и правит свой PR этой командой: она идёт мимо
+В окне Связка закрыта, и gh там без входа (metis-1333). Окно открывает, правит, закрывает, открывает снова и обновляет
+от base свой PR этой командой — голого `gh pr` (кроме merge, его держит шлюз) в исключениях окна нет. Она идёт мимо
 песочницы (excludedCommands, PR_OUT в pantheon.py), поэтому всё, что раньше держало правило gh-out guard для голого
 gh, проверяет она сама (Д2 плана):
 
@@ -19,7 +21,7 @@ gh, проверяет она сама (Д2 плана):
    цепочек, подстановок, присваивания и обёрток.
 
 Ещё: ветка PR — не базовая (create: --head или текущая ветка не main/master и не --base; edit, comment, ready по
-ветке — не main/master). gh получает разобранные флаги в форме `--флаг=значение` (разбор gh и команды не расходится),
+ветке, close, reopen, update-branch по ветке — не main/master; --delete-branch у close нет). gh получает разобранные флаги в форме `--флаг=значение` (разбор gh и команды не расходится),
 окружение без GH_*, GIT_* окна, XDG_CONFIG_HOME, EDITOR, VISUAL, BROWSER и PAGER, постоянный PATH (GH_PATH).
 `pantheon batch pr` ходит сюда же: pr_write — запись, gh_read — `gh pr list`.
 Код выхода: 2 — отказ (причина последней строкой stderr), иначе код gh.
@@ -37,13 +39,17 @@ __all__ = ["pr_cmd", "pr_write", "gh_read", "PrRefuse"]
 GH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"  # gh мимо песочницы — не из PATH окна (как GIT_PATH в gitout)
 ENV_DROP = ("XDG_CONFIG_HOME", "EDITOR", "VISUAL", "BROWSER", "PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR")
 ENV_KEEP = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL")
-USAGE = "pantheon pr create|edit|comment|ready [<номер PR|ветка>] [флаги gh pr]"
+USAGE = "pantheon pr create|edit|comment|ready|close|reopen|update-branch [<номер PR|ветка>] [флаги gh pr]"
 SHORT = {"R": "--repo", "F": "--body-file", "b": "--body", "t": "--title", "B": "--base", "H": "--head",
          "a": "--assignee", "l": "--label", "m": "--milestone", "p": "--project", "r": "--reviewer", "T": "--template",
          "d": "--draft", "f": "--fill"}
+# у close и reopen короткие флаги gh свои: -c — --comment, -d — --delete-branch (его нет в FORM: удаление ветки
+# необратимо, SEC-27 — ветку удаляет слияние или владелец), а не --draft create (metis-1335)
+SHORT_SUB = {"close": {"R": "--repo", "c": "--comment", "d": "--delete-branch"},
+             "reopen": {"R": "--repo", "c": "--comment"}, "update-branch": {"R": "--repo"}}
 VALUE = {"--repo", "--body-file", "--body", "--title", "--base", "--head", "--assignee", "--label", "--milestone",
          "--project", "--reviewer", "--template", "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
-         "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer"}
+         "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer", "--comment"}
 FORM = {
     "create": {"--repo", "--body-file", "--body", "--title", "--base", "--head", "--assignee", "--label", "--milestone",
                "--project", "--reviewer", "--template", "--draft", "--fill", "--fill-first", "--fill-verbose",
@@ -53,6 +59,10 @@ FORM = {
              "--remove-reviewer", "--remove-milestone"},
     "comment": {"--repo", "--body-file", "--body", "--edit-last", "--delete-last", "--create-if-none", "--yes"},
     "ready": {"--repo", "--undo"},
+    # metis-1335 (план metis-1331 PR-2b): закрыть, открыть снова, подтянуть base в ветку PR — обратимо (SEC-40)
+    "close": {"--repo", "--comment"},
+    "reopen": {"--repo", "--comment"},
+    "update-branch": {"--repo", "--rebase"},
 }
 SEL = re.compile(r"[1-9][0-9]{0,8}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,99})*")
 PROTECTED = {"main", "master"}
@@ -81,9 +91,10 @@ def _parse(sub, args):
             if flag == "--":
                 raise PrRefuse("«--» не принимается: позиционный — номер PR или ветка")
         elif a.startswith("-") and len(a) > 1:
-            if a[1] not in SHORT:
+            short = SHORT_SUB.get(sub, SHORT)
+            if a[1] not in short:
                 raise PrRefuse(f"флаг {a} не из таблицы формы gh pr {sub}")
-            flag, val = SHORT[a[1]], a[2:]
+            flag, val = short[a[1]], a[2:]
             if flag in VALUE:
                 val = val[1:] if val.startswith("=") else val
                 eq = "=" if val else ""
@@ -214,7 +225,7 @@ def gh_read(args, cwd):
 
 
 def pr_cmd(rest, cwd=None):
-    """pantheon pr create|edit|comment|ready … — код gh, отказ — 2."""
+    """pantheon pr create|edit|comment|ready|close|reopen|update-branch … — код gh, отказ — 2."""
     try:
         if not rest or rest[0] not in FORM:
             raise PrRefuse(USAGE)

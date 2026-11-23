@@ -112,8 +112,10 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill, EnterWorktree) и 
 - **Edit/Write песочница не держит.** Их судят protect-config (профили оболочки, `~/.ssh`, настройки git, LaunchAgents,
   `~/.claude.json`, `~/.local/bin`, защиты в `~/.claude`), pantheon-acl, private и domain (остальное в `~/.*` и
   `~/Library`). Сессии владельца без роли domain не ограничивает.
-- **gh мимо песочницы в окне направления** (gh-out, metis-0533): `gh pr create|edit|comment|ready` идут вне песочницы
-  (GH_PR_WRITE), правило пускает их только с `-R` из `[merge_repos]` своего направления (окно — по PANTHEON_WINDOW),
+- **gh мимо песочницы в окне направления** (gh-out, metis-0533): с metis-1335 (план metis-1331 PR-2b) голых
+  `gh pr create|edit|comment|ready|close|reopen|update-branch` мимо песочницы нет (GH_PR_WRITE — только `gh pr merge *`),
+  а в песочнице у gh нет входа. Правило отказывает им сразу с подсказкой `pantheon pr <подкоманда> …` (pr-cmd ниже) и
+  добавляет к отказу причину прежнего разбора формы — те же проверки делает `pantheon pr`. Прежний разбор пускал их только с `-R` из `[merge_repos]` своего направления (окно — по PANTHEON_WINDOW),
   без `--hostname` и адреса PR, а `--body-file`/`-F` — только realpath внутри временных папок и своей копии
   репозитория. Каждый `-R` (и склеенный `-Rx`, `--repo=x`) сверяется со списком. Из файла не уходят личное
   (`[private] paths`) и всё под `.git` любой копии — ключ git-crypt, `config` (metis-0596: в окне mnemo-brain своя
@@ -661,9 +663,12 @@ answer и плановый проход, это скрипты, guard их не 
   `pantheon batch pr <story-id> [--dry-run]`: цепочки, подстановки, кавычки, присваивания, обёртки и путь к пульту —
   отказ. Тест — tests/test_batch_pr_cmd.py, мутанты в нём. `git_window` пускает только origin из [merge_repos]
   policy.toml своего направления, а gh зовётся с постоянным PATH (`GH_PATH` в lib/pr_out.py), не с PATH окна. Запись
-  PR (create, edit) идёт через проверки `pantheon pr` (pr_out.py, metis-1334).
-- **pr-cmd (metis-1334, план metis-1331 PR-2a).** `pantheon pr create|edit|comment|ready` (`PR_OUT` в pantheon.py)
-  окна направлений идёт мимо песочницы: так окно открывает и правит свой PR, хотя gh в песочнице без входа. Проверки
+  PR (create, edit, close, reopen, update-branch) идёт через проверки `pantheon pr` (pr_out.py, metis-1334, 1335).
+- **pr-cmd (metis-1334, план metis-1331 PR-2a; metis-1335, PR-2b).**
+  `pantheon pr create|edit|comment|ready|close|reopen|update-branch` (`PR_OUT` в pantheon.py) окна направлений идёт
+  мимо песочницы: так окно открывает, правит, закрывает, открывает снова и обновляет от base свой PR, хотя gh в
+  песочнице без входа. У close нет `-d/--delete-branch`: удаление ветки необратимо (SEC-27), его делают слияние или
+  владелец; у close и reopen `-c` — это `--comment`, у update-branch — только `--rebase` и `-R`. Проверки
   gh-out (Д2 плана) делает сама команда, lib/pr_out.py: без GH_* в окружении; флаги только из таблицы формы подкоманды
   (без --hostname, --editor, --web); позиционный — номер PR или ветка, не адрес; --body-file — только из временных
   папок и своей копии, не из личного и не из .git, его текст читает команда и отдаёт gh как --body; репозиторий — из
@@ -672,7 +677,7 @@ answer и плановый проход, это скрипты, guard их не 
   PAGER, XDG_CONFIG_HOME и PATH = GH_PATH. guard держит только форму строки: строка целиком `pantheon pr <подкоманда>`
   и слова из букв, цифр, `. _ / : = @ + , % -` или строки в кавычках; цепочки, `&`, перенаправления, подстановки,
   присваивание, обёртки, путь к пульту, `#` и шаблоны — отказ. Тесты — tests/test_merge_gate_gh.py (t_pr_cmd) и
-  plugins/pantheon/tests/test_pr_out.py, мутанты в них. close, reopen и update-branch — не здесь (PR-2b).
+  plugins/pantheon/tests/test_pr_out.py, мутанты в них.
 - **review-delta-cmd (metis-1333).** `pantheon review delta` тоже идёт мимо песочницы, поэтому guard пускает только
   строку целиком `pantheon review delta <владелец/репозиторий> <PR>`: цепочки, подстановки, кавычки, `..`, лишние
   слова и флаги, присваивания, обёртки и путь к пульту — отказ. Прочий `pantheon review` правило не трогает. Тест —

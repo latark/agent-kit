@@ -48,7 +48,9 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
-  gh-out       — окну направления (PANTHEON_WINDOW) gh pr create|edit|comment|ready — только с -R из [merge_repos] его
+  gh-out       — окну направления (PANTHEON_WINDOW) голые gh pr create|edit|comment|ready|close|reopen|update-branch —
+                 отказ с подсказкой `pantheon pr …` (metis-1335: мимо песочницы их нет, в ней gh без входа); к
+                 отказу — причина прежнего разбора: только с -R из [merge_repos] его
                  направления, без «GH_X=» в строке (и в значении флага), export/read GH_* или $X и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без --hostname и адреса PR; --body-file и -F — только из временных папок
                  и своей копии репозитория (realpath), но не из личного ([private] paths) и не из .git любой копии,
@@ -75,8 +77,9 @@ PostToolUse (Bash:
                  обёрток (metis-1333); папку git и url origin проверяет сама команда (git_window);
   review-delta-cmd — `pantheon review delta` (мимо песочницы окна направления) — только строкой
                  `pantheon review delta <owner/repo> <PR>` без цепочек, кавычек, `..`, присваивания и обёрток (metis-1333);
-  pr-cmd       — `pantheon pr create|edit|comment|ready` (мимо песочницы окна направления) — только строкой целиком без
-                 цепочек, подстановок, присваивания и обёрток, текст — в кавычках (metis-1334); репозиторий, флаги,
+  pr-cmd       — `pantheon pr create|edit|comment|ready|close|reopen|update-branch` (мимо песочницы окна направления) —
+                 только строкой целиком без цепочек, подстановок, присваивания и обёрток, текст — в кавычках
+                 (metis-1334, 1335); репозиторий, флаги,
                  --body-file и окно с личным проверяет сама команда (lib/pr_out.py пантеона);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
@@ -4709,6 +4712,9 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
 
 
 GH_OUT_SUBS = {"create", "edit", "comment", "ready"}
+# запись в PR окна направления — только `pantheon pr …` (metis-1335, план metis-1331 PR-2b): голого gh pr мимо
+# песочницы нет (GH_PR_WRITE — только merge), а в ней gh без входа; правило отказывает сразу и подсказывает команду
+GH_PR_VIA_PANTHEON = GH_OUT_SUBS | {"close", "reopen", "update-branch"}
 # «GH_X=» — в сыром тексте строки и в разобранных словах; export/read без «=» — по разобранным командам. `--recover
 # <файл>` в таблице нет: gh читает им любой файл как JSON (metis-0596)
 GH_ENV_WORD = re.compile(r"GH_[A-Za-z0-9_]*\+?=")  # «GH_X=» где угодно в строке и в словах — отказ
@@ -4759,15 +4765,19 @@ def check_gh_out(event, tool, tool_input):
                 # merge тоже идёт мимо песочницы (GH_PR_WRITE) и несёт текст (--body, --subject): окну с личным — нет
                 return ("Правило gh-out: gh pr merge окну с личным закрыто (SEC-13, metis-0600): --body и --subject "
                         "уходят на GitHub, а слиять с этого окна нечего. Слияние — лид или владелец.")
-            if t[q] == "pr" and i is not None and t[i] in GH_OUT_SUBS:
-                why = _gh_out_problem(t, cmd, cwd, win, roots, "своего направления")
+            if t[q] == "pr" and i is not None and t[i] in GH_PR_VIA_PANTHEON:
+                hint = (f"Правило gh-out: голый gh pr {t[i]} в окне направления не идёт — в песочнице у gh нет входа "
+                        f"(metis-1333); свой PR — `pantheon pr {t[i]} [<N|ветка>] [флаги]` одной строкой, репозиторий — "
+                        "origin своей папки (metis-1335).")
+                why = _gh_out_problem(t, cmd, cwd, win, roots, "своего направления") if t[i] in GH_OUT_SUBS else None
                 if why:
-                    return (f"Правило gh-out: gh pr {t[i]} идёт мимо песочницы, поэтому {why} (metis-0533). Описание "
-                            "PR — в файл во временной папке или в своей копии репозитория и --body-file.")
+                    return (f"{hint} Кроме того, {why} (metis-0533): то же проверит и `pantheon pr`. Описание PR — в "
+                            "файл во временной папке или в своей копии репозитория и --body-file.")
                 if personal:
                     return (f"Правило gh-out: gh pr {t[i]} окну с личным закрыто (SEC-13, metis-0600): оно видит me/ и "
                             "выписки из веба и может сама вынести их в текст — третье свойство (наружу) ему не даём. "
                             "Закоммить в свою ветку, PR и комментарий откроет лид или владелец.")
+                return hint
     return None
 
 
@@ -5171,7 +5181,9 @@ def check_review_delta_cmd(event, tool, tool_input):
 # без ', "…" — без $ ` \ ! "). Цепочки, `&`, перенаправления, подстановки, присваивание, обёртки (env -S и прочие),
 # путь к пульту, комментарий # и шаблоны — отказ. Кавычки нужны заголовку; разбор Bash правило не наращивает.
 _PR_WORD = r"""(?:[\w./:=@+,%-]++|'[^']*+'|"[^"$`\\!]*+")++"""  # possessive: без перебора с возвратом
-PR_LINE = re.compile(r"[ \t]*pantheon[ \t]+pr[ \t]+(?:create|edit|comment|ready)(?:[ \t]+" + _PR_WORD + r")*[ \t]*\Z")
+# metis-1335 (план metis-1331 PR-2b): ещё close, reopen и update-branch — их флаги проверяет lib/pr_out.py пантеона
+PR_SUBS = r"(?:create|edit|comment|ready|close|reopen|update-branch)"
+PR_LINE = re.compile(r"[ \t]*pantheon[ \t]+pr[ \t]+" + PR_SUBS + r"(?:[ \t]+" + _PR_WORD + r")*[ \t]*\Z")
 PR_RAW = re.compile(r"""\s*(?:[^\s]*/)?pantheon(?:\.py)?\s+pr(?![A-Za-z0-9_-])""")
 
 
@@ -5196,7 +5208,7 @@ def check_pr_cmd(event, tool, tool_input):
     if PR_LINE.match(cmd):
         return None
     return ("Правило pr-cmd: `pantheon pr` идёт мимо песочницы, поэтому только одной строкой "
-            "`pantheon pr create|edit|comment|ready [<N|ветка>] [флаги]` (metis-1334): без `&&`, `;`, `|`, `&`, "
+            "`pantheon pr create|edit|comment|ready|close|reopen|update-branch [<N|ветка>] [флаги]` (metis-1334): без `&&`, `;`, `|`, `&`, "
             "перенаправлений, подстановок ($, обратные кавычки), префикса присваивания и обёрток; текст с пробелами — "
             "в кавычках, длинный — файлом --body-file. Папка — отдельным `cd` в свою копию.")
 

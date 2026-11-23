@@ -42,13 +42,15 @@ GIT_OUT_ONLY = ("push", "fetch")  # мимо песочницы из git — т�
 GIT_RAW_KNOWN = {"hestia": {"git push", "git push *"}}
 # metis-0972: белый список gh мимо песочницы, а не чёрный — новая строка gh в excludedCommands без записи здесь краснеет.
 # Чтение (view, checks, diff, list, status, run, issue, repo view, auth status) кода папки не исполняет: gh зовёт git
-# только для чтения remote и ветки. gh pr create — только с --head, gh pr merge — только с -R (guard, правило git-out):
-# без них gh зовёт git status (fsmonitor) и checkout/pull (хуки)
+# только для чтения remote и ветки. gh pr merge — только с -R (guard, правило git-out): без него gh зовёт git status
+# (fsmonitor) и checkout/pull (хуки). Запись в PR (create, edit, comment, ready, close, reopen, update-branch) — только
+# `pantheon pr …` (metis-1335, план metis-1331 PR-2b): голой записи gh pr в исключениях окон направлений нет
 GH_ALLOWED = {f"gh pr {c}{t}" for c in ("view", "checks", "diff", "list", "status") for t in ("", " *")} | {
     f"gh issue {c}{t}" for c in ("view", "list") for t in ("", " *")} | {
     f"gh run {c}{t}" for c in ("view", "list", "watch") for t in ("", " *")} | {
-    "gh repo view *", "gh auth status", "gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *",
-    "gh pr ready *"}
+    "gh repo view *", "gh auth status", "gh pr merge *"}
+# служебные окна с голой записью gh pr — своими правилами guard: Гестия (hestia-consent), Пританей (hq-gh)
+GH_RAW_KNOWN = {"hestia": {"gh pr create *", "gh pr edit *"}, "hq": {"gh pr edit *"}}
 # Не git, но пишет в рабочую копию: каждая такая команда — здесь явно, с причиной. Модель угроз всего класса — metis-0972
 WORKTREE_WRITE_KNOWN = {
     "gh pr merge *": "с --delete-branch gh переключает локальную копию на основную ветку и делает в ней pull; окна "
@@ -82,7 +84,7 @@ def worktree_write_problem(cmd, window=""):
             return f"{' '.join(t[:3])} пишет в рабочую копию"
         if t[:3] == ["gh", "pr", "merge"] and cmd not in WORKTREE_WRITE_KNOWN:
             return "gh pr merge — не в WORKTREE_WRITE_KNOWN"
-        if cmd not in GH_ALLOWED:
+        if cmd not in GH_ALLOWED and cmd not in GH_RAW_KNOWN.get(window, ()):
             return f"«{cmd}» — не в белом списке gh (GH_ALLOWED, metis-0972)"
     return None
 
@@ -92,13 +94,19 @@ def excluded_no_worktree_write(p, tmp):
     мастерская с SSH-remote, окна задач, Гестия, Пританей; ни одна строка excludedCommands не пишет в рабочую копию."""
     for cmd in ("git pull", "git pull *", "git merge *", "git checkout *", "git cherry-pick *", "git *", "*",
                 "gh pr checkout *", "gh pr *", "gh pr merge --admin *", "git push", "git push *", "git fetch *",
-                "gh repo fork *", "gh repo set-default *", "gh api *", "pantheon git *", "pantheon git pull *"):
+                "gh repo fork *", "gh repo set-default *", "gh api *", "pantheon git *", "pantheon git pull *",
+                "gh pr create *", "gh pr edit *", "gh pr comment *", "gh pr ready *", "gh pr close *", "gh pr reopen *",
+                "gh pr update-branch *"):  # metis-1335: запись в PR окна — только pantheon pr
         check(f"worktree_write_problem: «{cmd}» — отказ", worktree_write_problem(cmd), cmd)
     for cmd in ("pantheon git push *", "pantheon git fetch", "gh pr view *", "gh pr merge *", "pantheon alert *"):
         check(f"worktree_write_problem: «{cmd}» — можно", worktree_write_problem(cmd) is None,
               worktree_write_problem(cmd))
     check("worktree_write_problem: git push у Гестии — известная строка", worktree_write_problem("git push *", "hestia")
           is None)
+    check("worktree_write_problem: gh pr create у Гестии, gh pr edit у Пританея — известные строки, у окна "
+          "направления — отказ (metis-1335)",
+          worktree_write_problem("gh pr create *", "hestia") is None and worktree_write_problem("gh pr edit *", "hq") is None
+          and worktree_write_problem("gh pr create *", "hq") and worktree_write_problem("gh pr edit *", "alpha-test"))
     check("GIT_OUT: только pantheon git push и fetch, без git pull (metis-0971, 0972)",
           {tuple(x.split()[:3]) for x in p.GIT_OUT} == {("pantheon", "git", s) for s in GIT_OUT_ONLY}, p.GIT_OUT)
     folders = {}
@@ -178,6 +186,10 @@ def excluded_no_worktree_write(p, tmp):
     check("сборка не пустая: pantheon git fetch * и gh pr merge * у окна направления, у мастерской с SSH-remote",
           all("pantheon git fetch *" in windows.get(n, []) for n in ("alpha-test", "metis-pantheon") + (("workshop",) * ws_ssh))
           and "gh pr merge *" in windows.get("alpha-test", []), {n: windows.get(n) for n in ("alpha-test", "workshop")})
+    raw = {n: [c for c in windows.get(n, []) if c.startswith("gh pr ") and c.split()[2] not in
+               ("view", "checks", "diff", "list", "status", "merge")] for n in ("alpha-test", "metis-pantheon")}
+    check("metis-1335: у окон направлений голой записи gh pr нет (кроме merge — шлюз), запись в PR — pantheon pr *",
+          not any(raw.values()) and all("pantheon pr *" in windows.get(n, []) for n in raw), raw)
 
 
 def tail_rules(w):
@@ -374,7 +386,8 @@ def main():
                  "not `main`, `master` or the repository's default branch",
                  "to the `origin` remote of one of this direction's repositories (",
                  "(1) `pantheon git push origin HEAD:<branch>` or `pantheon git push ",  # metis-0972: голый git push guard запрещает
-                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)"):
+                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)",
+                 "(4) `pantheon pr create --base <default branch> --head <branch> "):  # metis-1335: голого gh pr нет
         check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
           "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]

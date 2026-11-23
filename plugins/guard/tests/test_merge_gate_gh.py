@@ -228,9 +228,12 @@ def t_hq_gh(h):
 
 
 def t_gh_out(h):
-    """gh-out (metis-0533): gh pr create|edit|comment|ready в окне направления идут мимо песочницы — только с -R из
-    [merge_repos] своего направления, без GH_*, --hostname, адреса PR; --body-file и -F — только realpath внутри
-    временных папок и своей копии репозитория. Вне окна направления (PANTHEON_WINDOW нет) правило не работает."""
+    """gh-out (metis-0533, metis-1335): голые gh pr create|edit|comment|ready|close|reopen|update-branch в окне
+    направления — отказ с подсказкой `pantheon pr …` (мимо песочницы их больше нет). К отказу — причина прежнего
+    разбора: -R только из [merge_repos] своего направления, без GH_*, --hostname, адреса PR; --body-file и -F — только
+    realpath внутри временных папок и своей копии репозитория. «Можно» прежнего разбора теперь — отказ одной подсказкой
+    (без «Кроме того»). Вне окна направления (PANTHEON_WINDOW нет) правило не работает."""
+    import re
     import tempfile
     W = {"PANTHEON_ROLE": "domain-coordinator", "PANTHEON_WINDOW": "metis-pantheon"}
     me = "~/ai/knowledge/me/x.md"
@@ -245,7 +248,12 @@ def t_gh_out(h):
 
     def case(name, cmd, allow, why="gh-out", **kw):
         d, r = win(cmd, **kw)
-        check(name, d == "allow" if allow else (d == "deny" and why in r), r)
+        if allow and re.search(r"(?<![\w-])pr(?![\w-]).*(?<![\w-])(?:create|edit|comment|ready)(?![\w-])", cmd):
+            # metis-1335: разбор формы не нашёл причины — отказ только подсказкой pantheon pr
+            ok = d == "deny" and "gh-out" in (r or "") and "`pantheon pr " in r and "Кроме того" not in r
+        else:
+            ok = d == "allow" if allow else (d == "deny" and why in r)
+        check(name, ok, r)
 
     R = "-R latark/agent-kit"
     for sub, tail in (("create", f"--title t --body-file {ok_body}"), ("edit 5", f"--body-file {ok_body}"),
@@ -385,6 +393,56 @@ def t_gh_out(h):
              "не вычислить")
     case("gh-out: gh pr view без -R — не задевает (чтение)", "gh pr view 5", True)
     case("gh-out: gh pr merge — свой шлюз, правило не задевает", "gh pr merge 5", False, "слияние")
+    # metis-1335: close, reopen, update-branch — тоже только через pantheon pr, без разбора формы
+    for sub in ("close 5", "reopen 5", "update-branch 5", "close 5 -d", f"update-branch 5 {R} --rebase"):
+        d, r = win(f"gh pr {sub}")
+        check(f"gh-out: голый gh pr {sub} — отказ с подсказкой pantheon pr (metis-1335)",
+              d == "deny" and f"`pantheon pr {sub.split()[0]} " in (r or ""), r)
+    d, r = win(f"gh pr create {R} --title t --body-file {ok_body}")
+    check("gh-out: подсказка называет ту же подкоманду и origin своей папки", d == "deny" and
+          "`pantheon pr create [<N|ветка>] [флаги]`" in (r or "") and "origin своей папки" in r, r)
+    import importlib.util
+    src = open(RULES, encoding="utf-8").read()
+    via = 'GH_PR_VIA_PANTHEON = GH_OUT_SUBS | {"close", "reopen", "update-branch"}\n'
+    tail = "                return hint\n"
+    check("gh-out самопроверка мутантов: строки множества и отказа по одной", src.count(via) == 1 and src.count(tail) == 1)
+    work = os.path.join(h.root, "gh-out-rules")
+    os.makedirs(work, exist_ok=True)
+
+    def load(text):
+        d = os.path.join(work, f"hooks_{len(os.listdir(work))}")
+        shutil.copytree(os.path.dirname(RULES), d, ignore=shutil.ignore_patterns("__pycache__"))
+        path = os.path.join(d, "guard_rules.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        spec = importlib.util.spec_from_file_location(f"guard_ghout_{len(os.listdir(work))}", path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    ev = {"cwd": h.j("projects/agent-kit")}
+    # окно направления в процессе теста; роль и папку окна запуска (личное) — свои, а не того окна, где идёт тест
+    keys = ("PANTHEON_WINDOW", "PANTHEON_ROLE", "CLAUDE_PROJECT_DIR")
+    saved = {k: os.environ.get(k) for k in keys}
+    os.environ.update({"PANTHEON_WINDOW": "metis-pantheon", "PANTHEON_ROLE": "domain-coordinator",
+                       "CLAUDE_PROJECT_DIR": ev["cwd"]})
+    try:
+        g = load(src)
+        # в процессе теста HOME настоящий: разбор формы create (policy, [merge_repos]) зависел бы от него, close — нет
+        check("gh-out: модуль без мутанта — gh pr close 5 отказ с подсказкой",
+              "pantheon pr close" in (g.check_gh_out(ev, "Bash", {"command": "gh pr close 5"}) or ""))
+        m = load(src.replace(via, "GH_PR_VIA_PANTHEON = GH_OUT_SUBS\n"))
+        check("gh-out мутант: без close/reopen/update-branch в множестве — gh pr close 5 проходит (мутант убит)",
+              m.check_gh_out(ev, "Bash", {"command": "gh pr close 5"}) is None)
+        m = load(src.replace(tail, "                return None\n"))
+        check("gh-out мутант: без итогового отказа подсказкой — gh pr close 5 проходит (мутант убит; для create — "
+              "случаи «можно» выше)", m.check_gh_out(ev, "Bash", {"command": "gh pr close 5"}) is None)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     # вне окна направления — не работает: нет PANTHEON_WINDOW
     d, r = h.pre("gh pr comment 5 -R torvalds/linux -b x", role="domain-coordinator", pdir="projects/agent-kit",
                  extra_env={"PANTHEON_ROLE": "domain-coordinator"})
@@ -480,11 +538,13 @@ def t_gh_out_private(h):
                          extra_env=WM)
             check(f"gh-out metis ({role or 'главная'}): cd ../../.git/git-crypt/keys && … -F default — отказ",
                   d == "deny" and "gh-out" in r, r)
-        # metis-0600: metis и продукты (папка без личного) — gh pr create/comment проходят по-прежнему
+        # metis-0600: metis и продукты (папка без личного) — не отказ «с личным»; metis-1335: голый gh pr — отказ
+        # подсказкой `pantheon pr …` (PR окна — только через неё)
         for role, aid in ((None, None), ("domain-coordinator", None), ("dev-sonnet", "sub1")):
             for cmd in ("gh pr comment 1 -R latark/agent-kit -b 'ok'", "gh pr create -R latark/agent-kit -t t -b 'ok'"):
                 d, r = h.pre(cmd, role=role, pdir="projects/agent-kit", agent_id=aid, extra_env=WM)
-                check(f"gh-out metis ({role or 'главная'}): {cmd[:22]}… без личного — можно", d == "allow", r)
+                check(f"gh-out metis ({role or 'главная'}): {cmd[:22]}… без личного — подсказка pantheon pr",
+                      d == "deny" and "`pantheon pr " in (r or "") and "с личным" not in r, r)
         for role, aid in ((None, None), ("domain-coordinator", None), ("dev-sonnet", "sub1")):
             d, r = h.pre("gh pr merge 1 -R latark/agent-kit --squash --body 'x'", role=role, pdir="projects/agent-kit",
                          agent_id=aid, extra_env=WM)
@@ -544,6 +604,8 @@ def t_pr_cmd(h):
         return (mod or g).check_pr_cmd(ev, "Bash", {"command": cmd})
 
     OK = ("pantheon pr create", "pantheon pr create --base main --head 1334-x --title 'Заголовок с пробелами' --body-file b.md",
+          # metis-1335: close, reopen, update-branch — той же строкой
+          "pantheon pr close 17 --comment 'дубль #18'", "pantheon pr reopen 1335-x", "pantheon pr update-branch 17 --rebase",
           "pantheon pr edit 17 -R latark/agent-kit --title=\"Новый: заголовок\" --add-label bug,ci",
           "pantheon pr comment 1334-x --body 'строка 1\nстрока 2 && id; $(x) `y`'", "  pantheon  pr  ready  17  ",
           "pantheon pr ready --undo 17",
@@ -560,7 +622,8 @@ def t_pr_cmd(h):
            "pantheon pr comment 5 --body $S", 'pantheon pr comment 5 --body "$(id)"', 'pantheon pr comment 5 --body "`id`"',
            "pantheon pr comment 5 --body-file ~/x.md", "pantheon pr comment 5 --body-file *.md",
            "pantheon pr comment 5 --body x # хвост", "pantheon pr ready 5\nid", "pantheon pr comment 5 --body 'oops",
-           "pantheon pr merge 5", "pantheon pr close 5", "pantheon pr", "pantheon pr view 5",
+           "pantheon pr merge 5", "pantheon pr closex 5", "pantheon pr update 5", "pantheon pr", "pantheon pr view 5",
+           "pantheon pr close 5 && gh pr merge 5", "pantheon pr update-branch 5; id", "pantheon pr reopen 5 | tee o",
            "PATH=/tmp pantheon pr ready 5", "GH_TOKEN=x pantheon pr ready 5", "env pantheon pr ready 5",
            "env -S 'pantheon pr ready 5'", "bash -c 'pantheon pr ready 5'", "nohup pantheon pr ready 5",
            "(pantheon pr ready 5)", "~/.local/bin/pantheon pr ready 5", "./pantheon pr ready 5",
@@ -592,6 +655,11 @@ def t_pr_cmd(h):
     m = load(src.replace(broke, "        pbroke = False\n"))
     check("pr-cmd мутант: без отказа при сбое разбора — `echo $(pantheon pr ready 5` проходит",
           run("echo $(pantheon pr ready 5", m) is None)
+    subs = 'PR_SUBS = r"(?:create|edit|comment|ready|close|reopen|update-branch)"\n'
+    check("pr-cmd самопроверка мутантов: строка подкоманд одна", src.count(subs) == 1)
+    m = load(src.replace(subs, 'PR_SUBS = r"(?:create|edit|comment|ready)"\n'))
+    check("pr-cmd мутант: без close/reopen/update-branch в PR_SUBS — одиночная строка close отказ (мутант убит)",
+          all(run(c, m) for c in ("pantheon pr close 5", "pantheon pr reopen 5", "pantheon pr update-branch 5")))
     reg = '                        ("pr-cmd", check_pr_cmd),\n'
     check("pr-cmd самопроверка мутантов: строка подключения одна", src.count(reg) == 1)
     m = load(src.replace(reg, ""))
