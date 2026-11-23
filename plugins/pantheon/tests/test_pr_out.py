@@ -80,10 +80,14 @@ try:
     shutil.copytree(LIB, GHLIB, ignore=shutil.ignore_patterns("__pycache__"))
     open(os.path.join(GHLIB, "pr_out.py"), "w", encoding="utf-8").write(src)
 
+    mutants = []
+
     def mutant(old, new):
         """Копия lib, где строка old проверки заменена на new (строка должна быть одна)."""
         check(f"самопроверка мутанта: строка одна — {old.strip()[:60]}", src.count(old) == 1)
-        d = os.path.join(W, f"lib{len(os.listdir(W))}")
+        # номер — свой счётчик, а не число файлов в W: gh.log, gh.env, gh.code появляются и исчезают между вызовами
+        mutants.append(old)
+        d = os.path.join(W, f"mut{len(mutants)}")
         shutil.copytree(GHLIB, d, ignore=shutil.ignore_patterns("__pycache__"))
         open(os.path.join(d, "pr_out.py"), "w", encoding="utf-8").write(src.replace(old, new))
         return d
@@ -145,9 +149,12 @@ try:
               k in genv_out for k in ("EDITOR", "VISUAL", "BROWSER", "PAGER", "XDG_CONFIG_HOME", "GIT_DIR",
                                       "GIT_CONFIG_GLOBAL")), f"{r.stderr} {genv_out.get('PATH')}")
     m = mutant('    env["PATH"] = GH_PATH\n', "")
-    r = cli("ready", "5", lib=m, env={"PATH": f"{bindir}:/usr/bin:/bin"})
+    # PATH окна — другая строка, чем GH_TEST_PATH (иначе мутант неотличим), но с поддельным gh первым
+    win_path = f"{bindir}:/bin:/usr/bin"
+    r = cli("ready", "5", lib=m, env={"PATH": win_path})
     genv_out = dict(ln.split("=", 1) for ln in open(ghenv).read().splitlines() if "=" in ln) if os.path.exists(ghenv) else {}
-    check("мутант убит: без PATH = GH_PATH gh получает PATH окна", genv_out.get("PATH") != GH_TEST_PATH, r.stderr)
+    check("мутант убит: без PATH = GH_PATH gh получает PATH окна", genv_out.get("PATH") == win_path,
+          f"{r.stderr} {genv_out.get('PATH')}")
     m = mutant('           if not k.startswith("GH_") and (not k.startswith("GIT_") or k in ENV_KEEP) and k not in ENV_DROP}',
                "           if True}")
     r = cli("ready", "5", lib=m, env={"EDITOR": "evil"})
