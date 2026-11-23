@@ -213,9 +213,23 @@ try:
     open(os.path.join(tmpd, "*.md"), "w").write("шаблон\n")  # файл с таким именем есть: без проверки он прочитался бы
     case("--body-file шаблоном", ["comment", "5", "-F", os.path.join(tmpd, "*.md")], why="шаблон",
          mut=('    if f == "-" or re.search(r"[*?\\[{]", f):\n', '    if f == "-":\n'))
-    priv_mut = ('    if _inside(full, _private()) or ".git" in full.split(os.sep):\n', "    if False:\n")
+    priv_line = '    if _inside(full, _private(), _key) or any(_key(c) == ".git" for c in full.split(os.sep)):\n'
+    priv_mut = (priv_line, "    if False:\n")
     case("--body-file из личного ([private] paths)", ["comment", "5", "-F", "secret/s.md"], mut=priv_mut, why="личное")
     case("--body-file из .git", ["comment", "5", "-F", ".git/HEAD"], mut=priv_mut, why=".git")
+    # metis-1334: APFS не различает регистр, realpath его не сводит — `.GIT/config` это `.git/config`. На
+    # регистрозависимой ФС (Linux CI) файлы свои, чтобы без свёртки команда дошла до gh, а не упала на «не читается»
+    for rel in (os.path.join(".GIT", "HEAD"), os.path.join(".Git", "config"), os.path.join("SECRET", "s.md")):
+        if not os.path.exists(os.path.join(repo, rel)):
+            os.makedirs(os.path.join(repo, os.path.dirname(rel)), exist_ok=True)
+            open(os.path.join(repo, rel), "w").write("x\n")
+    fold_mut = ('    return unicodedata.normalize("NFC", p).casefold()\n', "    return p\n")
+    undo_mut = (priv_line, '    if _inside(full, _private()) or ".git" in full.split(os.sep):\n')  # откат правки
+    for name, rel, why in ((".GIT/HEAD", os.path.join(".GIT", "HEAD"), ".git"),
+                           (".Git/config", os.path.join(".Git", "config"), ".git"),
+                           ("личное другим регистром", os.path.join("SECRET", "s.md"), "личное")):
+        case(f"--body-file {name} (регистр)", ["comment", "5", "-F", rel], mut=fold_mut, why=why)
+        case(f"--body-file {name} (регистр, откат)", ["comment", "5", "-F", rel], mut=undo_mut, why=why)
     case("--body-file вне временных папок и своей копии", ["comment", "5", "-F", outside], why="только из временных",
          mut=("    if not _inside(full, tmp + [top]):\n", "    if False:\n"))
     os.symlink(outside, os.path.join(tmpd, "link.md"))

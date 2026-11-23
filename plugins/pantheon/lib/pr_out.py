@@ -11,7 +11,7 @@ gh, проверяет она сама (Д2 плана):
    и -w/--web нет совсем: редактор и браузер мимо песочницы исполнили бы чужой код;
 5. позиционный — только номер PR или имя ветки (без URL и owner/repo#N); у create позиционных нет;
 6. -F/--body-file: без шаблонов, не «-»; realpath — только во временных папках и своей копии репозитория, не из личного
-   ([private] paths) и не из .git. Файл читает команда и отдаёт gh текстом (--body), gh путь не получает;
+   ([private] paths) и не из .git — оба без учёта регистра и формы Юникода (_key, APFS). Файл читает команда и отдаёт gh текстом (--body), gh путь не получает;
 7. репозиторий — из проверенного url origin своей папки (git_window в gitout.py: своя копия, origin только github.com
    и из [merge_repos] своего направления); -R можно не писать, а если он есть — только этот же репозиторий;
 8. окну с личным (координатор из [private] coordinators или личная папка среди папок окна) — отказ (SEC-13);
@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 
 __all__ = ["pr_cmd", "pr_write", "gh_read", "PrRefuse"]
 
@@ -126,8 +127,16 @@ def _private():
     return [os.path.realpath(os.path.expanduser(p)) for p in P.private_conf(_policy())["paths"]]
 
 
-def _inside(p, roots):
-    return any(p == r or p.startswith(r.rstrip("/") + "/") for r in roots)
+def _key(p):
+    """Ключ путей для отказов (личное, .git): APFS не различает регистр и формы Юникода, а realpath их не сводит —
+    `.GIT/config` это `.git/config`. Смысл тот же, что у _key guard; свёртка на любой ОС: отказ шире, не уже."""
+    return unicodedata.normalize("NFC", p).casefold()
+
+
+def _inside(p, roots, key=str):
+    """p внутри одного из roots; key=_key — для отказов, по умолчанию — побайтно (разрешённые папки не шире)."""
+    k = key(p)
+    return any(k == key(r) or k.startswith(key(r).rstrip("/") + "/") for r in roots)
 
 
 def _personal():
@@ -141,7 +150,7 @@ def _personal():
     dirs = doms.get(win) if isinstance(doms, dict) else None
     folders = [os.path.realpath(os.path.expanduser(d)) for d in (dirs if isinstance(dirs, list) else [])
                if isinstance(d, str)]
-    return any(_inside(x, folders) for x in _private())
+    return any(_inside(x, folders, _key) for x in _private())
 
 
 def _body(f, cwd, top):
@@ -149,7 +158,7 @@ def _body(f, cwd, top):
     if f == "-" or re.search(r"[*?\[{]", f):
         raise PrRefuse(f"--body-file {f}: шаблон и «-» (stdin) не принимаются — имя файла целиком")
     full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f)))
-    if _inside(full, _private()) or ".git" in full.split(os.sep):
+    if _inside(full, _private(), _key) or any(_key(c) == ".git" for c in full.split(os.sep)):
         raise PrRefuse(f"--body-file {f}: личное ([private] policy.toml) и файлы из .git на GitHub не выносятся")
     tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp") if p]
     if not _inside(full, tmp + [top]):
