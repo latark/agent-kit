@@ -303,7 +303,8 @@
   Lead Delivery (с 0.11.38, metis-0215) разрешает лиду сдать работу по поручению координатора без отказа Auto-Mode
   Bypass: push рабочей ветки в `origin`, запуск ревьюера `argus`, `pantheon night report`, `pantheon pr create` для этой
   ветки и `pantheon pr edit|comment|ready|close|reopen|update-branch` её PR, а также `pantheon worktree remove` своей
-  отработанной копии (metis-1336; merge, `--delete-branch` и чужие репозитории — нет). Push не покрывает `main`, `master` и ветку по умолчанию, а также `--force`, `-f`, `--force-with-lease`,
+  отработанной копии под `.claude/worktrees/` (metis-1336; копию с подмодулями команда не убирает; merge, `--delete-branch`
+  и чужие репозитории — нет). Push не покрывает `main`, `master` и ветку по умолчанию, а также `--force`, `-f`, `--force-with-lease`,
   `+refspec`, удаление ветки, другие remote, `cd` и цепочки команд. Репозитории — только из `[merge_repos]`
   направления; без такой записи правила сдачи нет, как и правила слияния. Слияние это правило не покрывает: его
   пускает только Gated Merge.

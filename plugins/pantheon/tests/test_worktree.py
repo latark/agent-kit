@@ -10,7 +10,8 @@
   (git worktree add --detach мимо команды) и копия посреди merge/rebase/bisect — отказ 2, файлы целы;
 - remove копии на ветке без --force (metis-1336, случай metis-1324): индекс и рабочее дерево расходятся, но git diff HEAD
   пуст, неотслеживаемых нет и ветка в origin/main — убрана, ветка осталась; несохранённая правка, неотслеживаемый файл,
-  коммит не в origin/main, merge посреди, нет origin/main — код 1 с причиной, файлы целы; мутант на каждую проверку;
+  коммит не в origin/main, merge посреди, нет origin/main, инициализированный подмодуль (его незапушенный коммит --force
+  стёр бы) — код 1 с причиной, файлы целы; мутант на каждую проверку;
 - вложенные папки направлений: владелец репозитория — самая глубокая (Д3);
 - git зовётся с GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна (F2);
 - фоновая проверка #488: копия, где окно подменило .git, commondir, положило config, config.worktree или ссылку в
@@ -379,6 +380,30 @@ r = cli(mine, "remove", "set-6", lib=mutant("    if base is None:\n        retur
                                             '    if base is None:\n        base = "HEAD"\n    if False:\n        return'))
 check("мутант: без проверки origin/main — копия set-6 убрана (мутант убит тестом выше)", r.returncode == 0
       and not os.path.exists(wt(mine, "set-6")), r.stderr)
+# копия с инициализированным подмодулем: git её не убирает, --force стёр бы незапушенный коммит подмодуля (argus #540)
+subrepo = mkrepo(os.path.join(ROOT, "subrepo"))
+t = settled_copy("set-7")
+git(t, "reset", "-q", "--hard", "HEAD")
+git(t, "-c", "protocol.file.allow=always", "submodule", "-q", "add", subrepo, "sm")
+git(t, "commit", "-q", "-m", "подмодуль")
+git(mine, "update-ref", "refs/remotes/origin/main", git(t, "rev-parse", "HEAD"))
+sm = os.path.join(t, "sm")
+git(sm, "commit", "-q", "--allow-empty", "-m", "незапушенный")
+lost = git(sm, "rev-parse", "HEAD")
+git(sm, "branch", "side")
+git(sm, "checkout", "-q", "--detach", "HEAD~1")
+check("самопроверка: копия с подмодулем чиста относительно HEAD, modules в gitdir копии",
+      git(t, "status", "--porcelain") == "" and os.path.isdir(os.path.join(gitdir(t), "modules")),
+      git(t, "status", "--porcelain"))
+r = cli(mine, "remove", "set-7")
+check("remove копии с подмодулем — код 1, «без --force не убрана: подмодули», коммит подмодуля цел", r.returncode == 1
+      and "без --force не убрана: подмодули" in r.stderr and os.path.isdir(sm)
+      and git(sm, "rev-parse", "side") == lost, r.stderr)
+r = cli(mine, "remove", "set-7", lib=mutant('    if (os.path.lexists(os.path.join(gd, "modules"))',
+                                            '    if False and (os.path.lexists(os.path.join(gd, "modules"))'))
+check("мутант: без проверки подмодулей — копия set-7 убрана вместе с коммитом подмодуля (мутант убит тестом выше)",
+      r.returncode == 0 and not os.path.exists(t), r.stderr)
+git(mine, "update-ref", "-d", "refs/remotes/origin/main")
 
 
 # F2: GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна — по самому вызову git (системный gitconfig в тесте не подменить)

@@ -26,7 +26,9 @@ Claude Code (2.1.325) в песочнице закрывает запись в .
 - remove копии на ветке без --force, которую git не убрал (metis-1336, случай metis-1324): убирается, только если все
   коммиты ветки уже в основной ветке origin (merge-base --is-ancestor с origin/HEAD, origin/main или origin/master),
   `git diff HEAD` пуст и неотслеживаемых нет — расхождение индекса и рабочего дерева при нулевом итоге не держит;
-  ветка остаётся. Иначе — прежний отказ git (код 1) с причиной. Эти проверки (_settled) зовут git в основной копии с
+  ветка остаётся. Копия с подмодулями (gitdir копии/modules, .gitmodules в копии или gitlink 160000 в индексе) —
+  отказ всегда: git сам её не убирает, а --force стёр бы незапушенные коммиты подмодуля. Иначе — прежний отказ git
+  (код 1) с причиной. Эти проверки (_settled) зовут git в основной копии с
   --git-dir проверенного gitdir копии и --work-tree копии, без внешнего diff и textconv;
 - git — с GIT_CONFIG_NOSYSTEM=1: системный gitconfig мимо песочницы не читается (глобальный ~/.gitconfig читается —
   в нём git-lfs владельца; остаток — README guard);
@@ -313,8 +315,8 @@ def _main_ref(repo):
 
 def _settled(repo, gd, target):
     """Отработанная копия на ветке (metis-1336, случай metis-1324): все коммиты ветки уже в основной ветке origin,
-    `git diff HEAD` пуст и неотслеживаемых нет — расхождение индекса и рабочего дерева при нулевом итоге не держит.
-    None — можно убрать с --force (ничего несохранённого не теряется), иначе причина отказа. git — в основной копии
+    `git diff HEAD` пуст, неотслеживаемых нет и подмодулей нет (их коммиты --force стёр бы) — расхождение индекса и
+    рабочего дерева при нулевом итоге не держит. None — можно убрать с --force (ничего несохранённого не теряется), иначе причина отказа. git — в основной копии
     с --git-dir проверенного gitdir копии (_verify_copy: в нём нет config и ссылок) и --work-tree копии, с GIT_SAFE,
     без внешнего diff и textconv."""
     busy = [b for b in BUSY if os.path.lexists(os.path.join(gd, b))]
@@ -324,6 +326,10 @@ def _settled(repo, gd, target):
     if base is None:
         return "нет origin/main — `pantheon git fetch` и повтор"
     g = ["--git-dir=" + gd, "--work-tree=" + target]
+    stage = _git([*g, "ls-files", "--stage", "-z"], repo)
+    if (os.path.lexists(os.path.join(gd, "modules")) or os.path.lexists(os.path.join(target, ".gitmodules"))
+            or stage.returncode != 0 or any(e.startswith("160000 ") for e in stage.stdout.split("\0"))):
+        return "подмодули — --force стёр бы и их незапушенные коммиты; убери копию сам"
     head = _git([*g, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], repo)
     sha = head.stdout.strip()
     if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):

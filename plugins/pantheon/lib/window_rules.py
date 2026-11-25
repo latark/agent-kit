@@ -75,12 +75,12 @@ LEAD_DELIVERY_RULE = (
     "the owner's own Pantheon state. (4) `pantheon pr create --base <default branch> --head <branch> "
     "--title … --body-file …` (repository fixed to the origin of the folder) for a branch pushed under (1), on one of this direction's repositories, "
     "and for that same PR `pantheon pr edit|comment|ready|close|reopen|update-branch <N|branch>` with their own "
-    "flags: the command refuses the default branch, another repository and `--delete-branch`. (5) `pantheon "
-    "worktree remove <name>` (optionally `--force`) of the session's own copy under `.claude/worktrees/` of one of "
-    "this direction's repositories, after its work is done: the command removes only a registered copy of the "
-    "repository of the current folder, keeps the branch, refuses a copy with unsaved changes unless its branch is "
-    "already in `origin/main` and nothing differs from HEAD, and allows `--force` only for a copy without a branch "
-    "made by `pantheon worktree add --detach`. Neither (4) nor (5) covers `gh pr merge`, `pantheon pr merge`, "
+    "flags: the command refuses `main` and `master`, another repository and `--delete-branch`. (5) `pantheon "
+    "worktree remove <name>` (optionally `--force`) of a copy registered by `git worktree list` under "
+    "`.claude/worktrees/` of one of this direction's repositories, after its work is done: the command removes only "
+    "such a copy of the repository of the current folder and keeps the branch; it refuses a copy with submodules, "
+    "and a copy with unsaved changes unless every commit of its branch is already in `origin/main`, `git diff HEAD` "
+    "is empty and there are no untracked files; it allows `--force` only for a copy without a branch made by `pantheon worktree add --detach`. Neither (4) nor (5) covers `gh pr merge`, `pantheon pr merge`, "
     "`--delete-branch`, a repository outside this list, `cd` or chained commands. A merge is still "
     "covered only by Pantheon Gated Merge; anything else is judged by the built-in rules.")
 REVIEW_RECORD_RULE = (
