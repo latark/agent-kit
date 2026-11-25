@@ -107,6 +107,10 @@ def check_plan10(texts, flat, callers):
     """План 1.0, шаг 0 (решения 10.11, «да» владельца 12.11): модель и effort ролей по таблице раздела 6а,
     повторный круг argus (оба head, Р1, затронутые тесты), оценки в единицах конвейера, effort dev-opus и
     prometheus у тех, кто зовёт."""
+    # metis-1339 → metis-1336: клон для чтения кода — явным путём в $TMPDIR, без $(…) (guard не разберёт подстановку)
+    check("prometheus: git clone — только явным путём в своей папке $TMPDIR, без $(…)",
+          "git clone — только явным путём в своей папке `$TMPDIR`, без `$(…)`: `git clone --depth 1 <url> "
+          "\"$TMPDIR/<имя>\"`" in flat.get("prometheus.md", ""))
     plan6a = {"argus.md": ("opus", "medium"), "dev-opus.md": ("opus", "medium"), "chiron.md": ("opus", "medium"),
               "workshop.md": ("opus", "medium"), "prometheus.md": ("sonnet", "medium"), "momus.md": ("fable", "medium")}
     for f, (model, effort) in plan6a.items():

@@ -348,6 +348,39 @@ def nested_pin_levels(p, tmp, dw):
            "/.husky", "/**/.husky"} <= set(p.GRANT_WRITE_DENY), p.GRANT_WRITE_DENY)
 
 
+def check_lead_parts(lead):
+    # metis-0215, argus-42b: каждое исключение и сужение правила — отдельной подстрокой, чтобы удаление или
+    # расширение любого из них давало красный тест.
+    for part in ("`--force`, `-f`, `--force-with-lease`, a `+` refspec",
+                 "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands",
+                 "not `main`, `master` or the repository's default branch",
+                 "to the `origin` remote of one of this direction's repositories (",
+                 "(1) `pantheon git push origin HEAD:<branch>` or `pantheon git push ",  # metis-0972: голый git push guard запрещает
+                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)",
+                 "(4) `pantheon pr create --base <default branch> --head <branch> ",  # metis-1335: голого gh pr нет
+                 # metis-1336: свой PR — pantheon pr edit|…|update-branch, своя копия — pantheon worktree remove;
+                 # merge, --delete-branch, чужой репозиторий и цепочки по-прежнему за встроенными правилами
+                 "for that same PR `pantheon pr edit|comment|ready|close|reopen|update-branch <N|branch>`",
+                 "the command refuses those two branch names, another repository and `--delete-branch`.",
+                 "(5) `pantheon worktree remove <name>` (optionally `--force`) of a copy registered by "
+                 "`git worktree list` under `.claude/worktrees/` of one of this direction's repositories",
+                 "it refuses a copy with submodules, and a copy with unsaved changes unless every commit of its "
+                 "branch is already in `origin/main`, `git diff HEAD` is empty and there are no untracked files;",
+                 "allows `--force` only for a copy without a branch made by `pantheon worktree add --detach`",
+                 "Neither (4) nor (5) covers `gh pr merge`, `pantheon pr merge`, `--delete-branch`, a repository "
+                 "outside this list, `cd` or chained commands."):
+        check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
+    # «(4)» встречается дважды — в самом пункте и в «Neither (4) nor (5)»: делим по первому, иначе отказ выпадает
+    tail = lead.split("(4)", 1)[1]
+    body, refusal = tail.split("Neither (4) nor (5)", 1) if "Neither (4) nor (5)" in tail else (tail, "")
+    check("Lead Delivery (metis-1336): (4)–(5) не называют других подкоманд pr и worktree, merge — только в отказе",
+          set(re.findall(r"`pantheon (?:pr|worktree) ([a-z|-]+)", body))
+          == {"create", "edit|comment|ready|close|reopen|update-branch", "remove", "add"}
+          and set(re.findall(r"`pantheon (?:pr|worktree) ([a-z|-]+)", refusal)) == {"merge"}
+          and "merge" not in body and refusal.count("merge") == 3
+          and re.findall(r"`pantheon worktree add[^`]*`", tail) == ["`pantheon worktree add --detach`"], tail)
+
+
 def main():
     w = load("window_rules_t", os.path.join(LIB, "window_rules.py"))
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
@@ -379,16 +412,7 @@ def main():
     check("Lead Delivery: main/master только как исключение, строка (4) ограничена репозиториями направления",
           "not `main`, `master`" in lead and lead.count("master") == 1
           and "on one of this direction's repositories" in lead.split("(4)")[1])
-    # metis-0215, argus-42b: каждое исключение и сужение правила — отдельной подстрокой, чтобы удаление или
-    # расширение любого из них давало красный тест.
-    for part in ("`--force`, `-f`, `--force-with-lease`, a `+` refspec",
-                 "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands",
-                 "not `main`, `master` or the repository's default branch",
-                 "to the `origin` remote of one of this direction's repositories (",
-                 "(1) `pantheon git push origin HEAD:<branch>` or `pantheon git push ",  # metis-0972: голый git push guard запрещает
-                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)",
-                 "(4) `pantheon pr create --base <default branch> --head <branch> "):  # metis-1335: голого gh pr нет
-        check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
+    check_lead_parts(lead)
     check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
           "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
           and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
