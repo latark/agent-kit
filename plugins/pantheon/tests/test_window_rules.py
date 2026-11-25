@@ -367,11 +367,14 @@ def check_lead_parts(lead):
                  "Neither (4) nor (5) covers `gh pr merge`, `pantheon pr merge`, `--delete-branch`, a repository "
                  "outside this list, `cd` or chained commands."):
         check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
-    tail = lead.split("(4)")[1]
+    # «(4)» встречается дважды — в самом пункте и в «Neither (4) nor (5)»: делим по первому, иначе отказ выпадает
+    tail = lead.split("(4)", 1)[1]
+    body, refusal = tail.split("Neither (4) nor (5)", 1) if "Neither (4) nor (5)" in tail else (tail, "")
     check("Lead Delivery (metis-1336): (4)–(5) не называют других подкоманд pr и worktree, merge — только в отказе",
-          set(re.findall(r"`pantheon (?:pr|worktree) ([a-z|-]+)", tail))
-          == {"create", "edit|comment|ready|close|reopen|update-branch", "remove", "add", "merge"}
-          and tail.count("merge") == 3
+          set(re.findall(r"`pantheon (?:pr|worktree) ([a-z|-]+)", body))
+          == {"create", "edit|comment|ready|close|reopen|update-branch", "remove", "add"}
+          and set(re.findall(r"`pantheon (?:pr|worktree) ([a-z|-]+)", refusal)) == {"merge"}
+          and "merge" not in body and refusal.count("merge") == 3
           and re.findall(r"`pantheon worktree add[^`]*`", tail) == ["`pantheon worktree add --detach`"], tail)
 
 
