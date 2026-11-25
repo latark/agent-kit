@@ -8,6 +8,9 @@
   ветке — отказ 2, грязная копия цела;
 - --force — только у своей копии (метка pantheon-detach в gitdir, её пишет add --detach): чужая detached-копия
   (git worktree add --detach мимо команды) и копия посреди merge/rebase/bisect — отказ 2, файлы целы;
+- remove копии на ветке без --force (metis-1336, случай metis-1324): индекс и рабочее дерево расходятся, но git diff HEAD
+  пуст, неотслеживаемых нет и ветка в origin/main — убрана, ветка осталась; несохранённая правка, неотслеживаемый файл,
+  коммит не в origin/main, merge посреди, нет origin/main — код 1 с причиной, файлы целы; мутант на каждую проверку;
 - вложенные папки направлений: владелец репозитория — самая глубокая (Д3);
 - git зовётся с GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна (F2);
 - фоновая проверка #488: копия, где окно подменило .git, commondir, положило config, config.worktree или ссылку в
@@ -302,6 +305,80 @@ m = mutant("    if branch is None:\n", "    if False:\n")
 r = cli(mine, "add", "tmp-m", "--detach", lib=m)
 check("мутант: --detach без своей ветви кода — копии без ветки нет", r.returncode != 0
       or git(wt(mine, "tmp-m"), "rev-parse", "--abbrev-ref", "HEAD") != "HEAD", r.stdout + r.stderr)
+
+
+# metis-1336: отработанная копия на ветке (случай metis-1324) — без --force, если ветка в origin/main и итог нулевой
+def stage_revert(t):
+    """Индекс: a.txt = «staged», рабочее дерево: a.txt как в HEAD."""
+    open(os.path.join(t, "a.txt"), "w").write("staged\n")
+    git(t, "add", "a.txt")
+    open(os.path.join(t, "a.txt"), "w").write("a\n")
+
+
+def settled_copy(name, commit=False):
+    r = cli(mine, "add", name, "--base", "main")
+    assert r.returncode == 0, r.stderr
+    t = wt(mine, name)
+    if commit:
+        open(os.path.join(t, "new.txt"), "w").write("n\n")
+        git(t, "add", "new.txt")
+        git(t, "commit", "-q", "-m", "не в main")
+    stage_revert(t)
+    return t
+
+
+git(mine, "update-ref", "refs/remotes/origin/main", "main")
+t = settled_copy("set-1")
+check("самопроверка: индекс и рабочее дерево расходятся, git diff HEAD пуст",
+      git(t, "status", "--porcelain") != "" and git(t, "diff", "HEAD") == "", git(t, "status", "--porcelain"))
+r = cli(mine, "remove", "set-1")
+check("remove отработанной копии на ветке (ветка в origin/main, итог нулевой) — код 0, ветка осталась",
+      r.returncode == 0 and not os.path.exists(t) and t not in listed(mine)
+      and subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/set-1"], cwd=mine).returncode == 0,
+      r.stdout + r.stderr)
+t = settled_copy("set-2")
+open(os.path.join(t, "a.txt"), "w").write("несохранённое\n")
+r = cli(mine, "remove", "set-2")
+check("remove копии с несохранённой правкой — код 1, причина, файл цел", r.returncode == 1 and "git diff HEAD" in r.stderr
+      and open(os.path.join(t, "a.txt")).read() == "несохранённое\n", r.stderr)
+t = settled_copy("set-3")
+open(os.path.join(t, "u.txt"), "w").write("u\n")
+r = cli(mine, "remove", "set-3")
+check("remove копии с неотслеживаемым — код 1, причина, файл цел", r.returncode == 1 and "неотслеживаемые" in r.stderr
+      and os.path.exists(os.path.join(t, "u.txt")), r.stderr)
+t = settled_copy("set-4", commit=True)
+r = cli(mine, "remove", "set-4")
+check("remove копии с коммитом не в origin/main — код 1, причина, копия цела", r.returncode == 1
+      and "не в origin/main" in r.stderr and os.path.exists(os.path.join(t, "new.txt")), r.stderr)
+t = settled_copy("set-5")
+open(os.path.join(gitdir(t), "MERGE_HEAD"), "w").write(git(mine, "rev-parse", "HEAD") + "\n")
+r = cli(mine, "remove", "set-5")
+check("remove копии посреди merge — код 1, копия цела", r.returncode == 1 and "MERGE_HEAD" in r.stderr
+      and os.path.isdir(t), r.stderr)
+git(mine, "update-ref", "-d", "refs/remotes/origin/main")
+t = settled_copy("set-6")
+r = cli(mine, "remove", "set-6")
+check("remove без origin/main — код 1, подсказка fetch, копия цела", r.returncode == 1 and "fetch" in r.stderr
+      and os.path.isdir(t), r.stderr)
+git(mine, "update-ref", "refs/remotes/origin/main", "main")
+r = cli(mine, "remove", "set-6", lib=mutant("    if why is None:\n", "    if False:\n"))
+check("мутант: без уборки отработанной копии — код 1 (тест set-1 краснеет на откате)", r.returncode == 1
+      and os.path.isdir(t), r.stderr)
+ANC = '"--is-ancestor", sha, base], repo).returncode '
+DIFF = '"HEAD", "--"], repo).returncode '
+for nm, old, new, case in (
+        ("is-ancestor", ANC + "!= 0:", ANC + "== 99:", "set-4"),
+        ("diff HEAD", DIFF + "!= 0:", DIFF + "== 99:", "set-2"),
+        ("неотслеживаемые", "    if other.returncode != 0 or other.stdout:\n", "    if False:\n", "set-3"),
+        ("merge", "    if busy:\n        return", "    if False:\n        return", "set-5")):
+    r = cli(mine, "remove", case, lib=mutant(old, new))
+    check(f"мутант: без проверки {nm} — копия {case} убрана (мутант убит тестом выше)", r.returncode == 0
+          and not os.path.exists(wt(mine, case)), r.stderr)
+git(mine, "update-ref", "-d", "refs/remotes/origin/main")
+r = cli(mine, "remove", "set-6", lib=mutant("    if base is None:\n        return",
+                                            '    if base is None:\n        base = "HEAD"\n    if False:\n        return'))
+check("мутант: без проверки origin/main — копия set-6 убрана (мутант убит тестом выше)", r.returncode == 0
+      and not os.path.exists(wt(mine, "set-6")), r.stderr)
 
 
 # F2: GIT_CONFIG_NOSYSTEM=1 и без GIT_* окна — по самому вызову git (системный gitconfig в тесте не подменить)

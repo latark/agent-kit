@@ -23,9 +23,15 @@ Claude Code (2.1.325) в песочнице закрывает запись в .
   только у копии, которую создала сама эта команда с --detach (метка DETACH_MARK в gitdir копии — туда окну из
   песочницы не записать), и не во время rebase, merge, bisect (rebase-merge, rebase-apply, MERGE_HEAD, BISECT_LOG):
   чужие detached-копии (outside, revert_check, другие сессии) и копию на ветке --force не убирает никогда;
+- remove копии на ветке без --force, которую git не убрал (metis-1336, случай metis-1324): убирается, только если все
+  коммиты ветки уже в основной ветке origin (merge-base --is-ancestor с origin/HEAD, origin/main или origin/master),
+  `git diff HEAD` пуст и неотслеживаемых нет — расхождение индекса и рабочего дерева при нулевом итоге не держит;
+  ветка остаётся. Иначе — прежний отказ git (код 1) с причиной. Эти проверки (_settled) зовут git в основной копии с
+  --git-dir проверенного gitdir копии и --work-tree копии, без внешнего diff и textconv;
 - git — с GIT_CONFIG_NOSYSTEM=1: системный gitconfig мимо песочницы не читается (глобальный ~/.gitconfig читается —
   в нём git-lfs владельца; остаток — README guard);
-- git в копии не зовётся никогда (фоновая проверка #488, вариант А): окно после EnterWorktree с path пишет в gitdir
+- git в копии не зовётся никогда, кроме проверок _settled выше с явными --git-dir и --work-tree из основной копии
+  (фоновая проверка #488, вариант А): окно после EnterWorktree с path пишет в gitdir
   копии и её файл .git. Репозиторий ищется по папкам вверх до настоящей папки .git, а копию перед remove и меткой
   проверяет _verify_copy по файлам, как trusted_clone в outside.py: .git — обычный файл `gitdir:` на
   <repo>/.git/worktrees/<id>, commondir ведёт на <repo>/.git, gitdir — обратно на <копия>/.git, в gitdir копии нет
@@ -297,6 +303,41 @@ def _no_widening(repo, rev):
                      "владелец")
 
 
+def _main_ref(repo):
+    """Основная ветка origin: refs/remotes/origin/HEAD, иначе origin/main, origin/master; нет — None."""
+    for ref in ("refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master"):
+        if _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], repo).returncode == 0:
+            return ref
+    return None
+
+
+def _settled(repo, gd, target):
+    """Отработанная копия на ветке (metis-1336, случай metis-1324): все коммиты ветки уже в основной ветке origin,
+    `git diff HEAD` пуст и неотслеживаемых нет — расхождение индекса и рабочего дерева при нулевом итоге не держит.
+    None — можно убрать с --force (ничего несохранённого не теряется), иначе причина отказа. git — в основной копии
+    с --git-dir проверенного gitdir копии (_verify_copy: в нём нет config и ссылок) и --work-tree копии, с GIT_SAFE,
+    без внешнего diff и textconv."""
+    busy = [b for b in BUSY if os.path.lexists(os.path.join(gd, b))]
+    if busy:
+        return f"идёт {', '.join(busy)}"
+    base = _main_ref(repo)
+    if base is None:
+        return "нет origin/main — `pantheon git fetch` и повтор"
+    g = ["--git-dir=" + gd, "--work-tree=" + target]
+    head = _git([*g, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], repo)
+    sha = head.stdout.strip()
+    if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+        return "HEAD копии не коммит"
+    if _git(["merge-base", "--is-ancestor", sha, base], repo).returncode != 0:
+        return f"коммит {sha[:8]} не в {base.removeprefix('refs/remotes/')} — ветка не слита (или `pantheon git fetch`)"
+    if _git([*g, "diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], repo).returncode != 0:
+        return "есть несохранённые правки относительно HEAD (git diff HEAD не пуст)"
+    other = _git([*g, "ls-files", "--others", "--exclude-standard", "-z"], repo)
+    if other.returncode != 0 or other.stdout:
+        return "есть неотслеживаемые файлы"
+    return None
+
+
 def _remove(repo, name, force=False):
     target = _target(repo, name, create=False)
     if not os.path.isdir(target) or os.path.islink(target):
@@ -318,12 +359,21 @@ def _remove(repo, name, force=False):
         raise Refuse(f"{P.tilde(target)} — идёт {', '.join(busy)}: --force не убирает копию посреди rebase, merge или "
                      "bisect — доведи или прерви их сам")
     r = _git(["worktree", "remove", *(["--force"] if force else []), target], repo)
+    why = None
+    if r.returncode != 0 and not force and not detached:
+        why = _settled(repo, gd, target)
+        if why is None:
+            r = _git(["worktree", "remove", "--force", target], repo)
+            if r.returncode == 0:
+                print(f"worktree {P.tilde(target)} убрана: ветка уже в основной, итог относительно HEAD нулевой "
+                      "(ветка осталась)")
+                return 0
     if r.returncode != 0:
         mine = detached and os.path.isfile(os.path.join(gd, DETACH_MARK))
         hint = (" — своя копия без ветки: `pantheon worktree remove " + name + " --force`") if mine else \
             " (без --force: незакоммиченное не удаляется)"
-        print(f"pantheon worktree remove: git worktree remove не прошёл{hint}: {r.stderr.strip()[-400:]}",
-              file=sys.stderr)
+        print(f"pantheon worktree remove: git worktree remove не прошёл{hint}: {r.stderr.strip()[-400:]}"
+              + (f"; без --force не убрана: {why}" if why else ""), file=sys.stderr)
         return 1
     print(f"worktree {P.tilde(target)} убрана" + ("" if detached else " (ветка осталась)"))
     return 0
