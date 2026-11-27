@@ -255,6 +255,7 @@ def _file(name, text):
 def _live_mb(sha, base, mb):
     """live_test на идущий (running, без base — полный набор вместо узкого) итог с merge-base B0 в очереди STATE."""
     rid = "20261105-900000-bbbbbb"
+    os.makedirs(O.root("queue"), mode=0o700, exist_ok=True)   # save_result папку заявок не создаёт, а к этому месту очереди ещё нет
     O.save_result(O.root("queue"), rid, {"state": "running", "kind": "test", "sha": sha, "src": RK, "mb": B0})
     try:
         return O.live_test(RK, sha, base=base, mb=mb) == (O.root("queue"), rid)
