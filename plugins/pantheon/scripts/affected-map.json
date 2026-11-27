@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "head": "8ee4fe59",
+  "head": "21b9dced",
   "python": "3.14",
   "hashes": {
     "guard/test_agents_after.py": "db8a044f29083840209e6c6d9b8018ea6098231b66c3d31cf843ab668997e943",
@@ -184,7 +184,7 @@
     "pantheon/test_roles.py": "10ed66e53d76df5c501667c0b0208d41b5ddc5517780d97cace8d46202fde3fb",
     "pantheon/test_roles_harness.py": "de89f400f04dc4cd568bdd3356731b2d8fa6f82a7f44e0e4460e95d11800b5f6",
     "pantheon/test_roster.py": "7971c3684b924cf83a93e1d1841d70826c0ddd52d1ae5dcbe7ebdef0479bec2d",
-    "pantheon/test_run_tests.py": "f58e7e458ee7ce3e591680eac26c6b974dbbb1aeafbe70ea960067902b7d6d55",
+    "pantheon/test_run_tests.py": "71f048ea895a27b230597b49cd662c8a1fec070806d57c8a9ce439f5a9cffa5a",
     "pantheon/test_sandbox_size.py": "e36483349d664c2a414e582fb006efa89dded2b8212f676b3e948ac96a5c76ea",
     "pantheon/test_saved_hq.py": "f30b26565cf024edb90ac954b9658b764c12f9ef0241e016ea03035271ad7169",
     "pantheon/test_schedule_defaults.py": "6c43d82e3a3cddb39b0bcde2cd6c053d9d26cf40887d7391b43b0f8983a1110a",
@@ -1009,7 +1009,7 @@
   },
   "sums": {
     ".claude-plugin/marketplace.json": "2d85737b88389ce7fd67d9b4bebc427dff0d94484e2105fe3f989a410bfc1a11",
-    ".claude-plugin/releases.json": "cc02821fa3721416311d2f19410ebc8328a9533c19f5c72bbb3d2ef16e08530d",
+    ".claude-plugin/releases.json": "a4d59889efe1b939b8c0360305cb5bbbaa1b58c5e209eadeaa04ec02c441717d",
     ".github/ruff-requirements.txt": "067b86c8c007e2af54995b8aeef4d6c71542e445c7f2ee7246ee9f2c756464a3",
     ".github/scripts/release.py": "7c3a120f029aa7bb662d358889a4ff489ea298a014071a9c9ec71e2fab417dbe",
     ".github/scripts/test_release.py": "18e3a331da1a072c6791d93991d312b36e940c4be93eb379c2609d168d6df61f",
@@ -1112,7 +1112,7 @@
     "plugins/guard/tests/test_tg_self.py": "3ab61e310e650442e3dd261d4ee409b9fe311d4c780da1eb221749a3dd84691c",
     "plugins/guard/tests/test_worktree_cmd.py": "2fa5ce89eb5225493387c693f0ff7f801155debb8b3d835978e9e01a87c1a4cf",
     "plugins/guard/tests/test_worktree_own.py": "e8b58ba82bd293e49a9c71c612b07b28723cc262436d13be96278c98cd5a68d1",
-    "plugins/pantheon/.claude-plugin/plugin.json": "5421e1f5ad0bce588b97698ae9830ad10e4e776211deb75b97a26c4926ed9de4",
+    "plugins/pantheon/.claude-plugin/plugin.json": "0194fcb20c2c9f38b7e029841c103f8c9dad20085083e45103d0e312b2f8655f",
     "plugins/pantheon/bin/heavy": "86beacc7de5f89704500f15a8e5139c81cfaba20aeaca29007399c48bdc50a4b",
     "plugins/pantheon/bin/pantheon": "fb57ba5992df6b6d75a913429ccdb7438bb5bd95301a95184f639d98b32a4220",
     "plugins/pantheon/bin/pantheon-setup": "cb5b2d9f88ead0eab3775567e122850fa324b92ef0e946d3019d718f4d89adab",
@@ -1447,7 +1447,7 @@
     "plugins/pantheon/tests/test_roles.py": "10ed66e53d76df5c501667c0b0208d41b5ddc5517780d97cace8d46202fde3fb",
     "plugins/pantheon/tests/test_roles_harness.py": "de89f400f04dc4cd568bdd3356731b2d8fa6f82a7f44e0e4460e95d11800b5f6",
     "plugins/pantheon/tests/test_roster.py": "7971c3684b924cf83a93e1d1841d70826c0ddd52d1ae5dcbe7ebdef0479bec2d",
-    "plugins/pantheon/tests/test_run_tests.py": "f58e7e458ee7ce3e591680eac26c6b974dbbb1aeafbe70ea960067902b7d6d55",
+    "plugins/pantheon/tests/test_run_tests.py": "71f048ea895a27b230597b49cd662c8a1fec070806d57c8a9ce439f5a9cffa5a",
     "plugins/pantheon/tests/test_sandbox_size.py": "e36483349d664c2a414e582fb006efa89dded2b8212f676b3e948ac96a5c76ea",
     "plugins/pantheon/tests/test_saved_hq.py": "f30b26565cf024edb90ac954b9658b764c12f9ef0241e016ea03035271ad7169",
     "plugins/pantheon/tests/test_schedule_defaults.py": "6c43d82e3a3cddb39b0bcde2cd6c053d9d26cf40887d7391b43b0f8983a1110a",
