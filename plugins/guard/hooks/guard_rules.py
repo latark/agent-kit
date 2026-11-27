@@ -5411,10 +5411,25 @@ def check_worktree_own(event, tool, tool_input):
         # проекта не папки запуска расширили бы окно так же (metis-0915, Д3 argus 2 #360). Agent без них — молчит
         sub = tool_input.get("cwd")
         at = _expand(sub, cwd) if isinstance(sub, str) and sub else cwd
-        if tool_input.get("isolation") != "worktree" and at == cwd:
+        iso = tool_input.get("isolation") == "worktree"
+        if not iso and at == cwd:
             return None
-        repo, found = _cwd_widening(at, doms, win, launch)
-        return _widen_msg(repo, found) if found else None
+        # куда субагент пишет — папка cwd, а не только копия (metis-1391, Д3 argus #545): cwd вне папок своего
+        # направления (чужое направление, вне directions.toml) — отказ, кроме временных папок окна ($TMPDIR, /tmp,
+        # $PANTHEON_TMP; корень, в котором сам HOME, временным не считается)
+        tmp = [r for r in (os.path.realpath(p) for p in (*TEMP_ROOTS, os.environ.get("PANTHEON_TMP")) if p)
+               if not _inside(HOME, [r])]
+        owner = _owner(at, doms)[1]
+        if at != cwd and owner != win and not _inside(at, tmp):
+            where = f"папка направления {owner}" if owner else f"вне папок направления {win} (directions.toml, folders)"
+            return (f"Правило worktree-own: Agent с cwd {at} — {where}; субагент окна пишет только в папки своего "
+                    "направления (metis-1391). Другой репозиторий — задача его направлению, а не вопрос владельцу.")
+        # isolation — копия репозитория папки сессии, cwd — папка субагента: настройки судятся у обеих
+        for d in ([cwd] if iso else []) + ([at] if at != cwd else []):
+            repo, found = _cwd_widening(d, doms, win, launch)
+            if found:
+                return _widen_msg(repo, found)
+        return None
     if not isinstance(raw, str) or not raw:
         # name — новая worktree самим Claude Code, мимо проверок `pantheon worktree add`: окну направления закрыто
         # (решение владельца 15.11, вариант А metis-1225; П9b в pantheon.py снимает deny только ради path)

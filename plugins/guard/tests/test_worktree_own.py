@@ -166,6 +166,21 @@ try:
     check("14 Agent isolation worktree в папке запуска — пропуск", r is None, r)
     r = agent({"isolation": "worktree"}, os.path.join(root, "projects/stray"))
     check("14 Agent вне папок направления — молчит (правило про настройки своих папок)", r is None, r)
+    # metis-1391 (Д3 argus #545): судится и папка, куда субагент пишет (cwd), а не только копия папки сессии
+    r = agent({"cwd": os.path.join(root, "projects/projAApp")}, LW)
+    check("15 Agent с cwd в репозиторий чужого направления — отказ",
+          bool(r) and "worktree-own" in r and "athena-proja" in r, r)
+    r = agent({"cwd": os.path.join(root, "projects/stray/.claude/worktrees/y")}, LW)
+    check("15 Agent с cwd вне папок направления — отказ", bool(r) and "вне папок направления" in r, r)
+    r = agent({"cwd": LW + "/.claude/worktrees/a"}, LW)
+    check("15 Agent с cwd в своей worktree — пропуск", r is None, r)
+    r = agent({"isolation": "worktree", "cwd": LW}, EC)
+    check("15 Agent isolation с cwd в папку запуска из второй папки с allow — отказ (копия папки сессии)",
+          bool(r) and "permissions.allow" in r, r)
+    os.environ["PANTHEON_TMP"] = os.path.join(root, "ptmp")
+    r = agent({"cwd": os.path.join(root, "ptmp/x")}, LW)
+    check("15 Agent с cwd во временной папке окна — пропуск", r is None, r)
+    os.environ.pop("PANTHEON_TMP", None)
     os.environ.pop("PANTHEON_WINDOW", None)
     r = g.check_worktree_own({"cwd": EC}, "Agent", {"isolation": "worktree"})
     check("14 Agent вне окна направления — молчит", r is None, r)
