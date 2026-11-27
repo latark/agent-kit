@@ -1769,6 +1769,12 @@ def narrow_history_problem(d):
     return None
 
 
+def narrow_mb(d, base, sha):
+    """Единственная merge-base вершины base и коммита sha (40 знаков) или None — нет, не одна, не посчитана."""
+    mbs = (git(d, "merge-base", "--all", base, sha) or "").split()
+    return mbs[0] if len(mbs) == 1 and SHA_RE.fullmatch(mbs[0]) else None
+
+
 def narrow_plan(d, sha, argv, line, base):
     """Узкий набор заявки test --affected (metis-0734) → (план или None, почему нельзя). План — {argv, line, mb, map,
     mp}: команда проверки проекта (run-tests.py с папками плагинов, как у дозапуска — runner_args) с `--affected --base
@@ -2244,6 +2250,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
         extra["base"] = base
     if narrow_why:   # история подменена — полный набор вместо узкого (запись полная, годится и ядру)
         extra["narrow_why"] = narrow_why
+    if base:   # metis-0855 Д3: merge-base заявки — live_test не сцепляет прогоны с разной узкой базой (и после подмены истории)
+        extra["mb"] = narrow["mb"] if narrow else narrow_mb(d, base, sha)
     if keys:
         extra["keys"] = sorted(keys)
     running = {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, "started": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -4184,7 +4192,8 @@ def cmd_request(kind, args):
             head, _clean = head_state(d)
         if head:
             req["sha"] = head
-            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"), app=req.get("app"))
+            prev = live_test(d, head, f.get("--script"), pin=bool(req.get("pin")), base=req.get("base"), app=req.get("app"),
+                             mb=narrow_mb(d, req["base"], head) if req.get("base") else None)
             if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
                 print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
                 if not wait:
@@ -4292,11 +4301,13 @@ def replace_older(q, rid, req, d):
     return [r for r, _ in out]
 
 
-def live_test(d, sha, script=None, pin=False, base=None, app=None):
+def live_test(d, sha, script=None, pin=False, base=None, app=None, mb=None):
     """(папка заявок, ID) живой заявки test на этот head и эту папку или None (--sha и обычная на одном SHA не сцеплены,
     metis-0796: у pin-заявки свой прогон в копии, у обычной — по дереву папки с её правками): в очереди (лежит .req.json),
     ждёт спада нагрузки (итог queued «жду спада нагрузки» свежее LOST_AFTER, metis-0927) или идёт (итог running свежее
-    TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает. mb — merge-base заявки --affected (metis-0855 Д3):
+    у итога с mb она должна совпасть — после переписи истории тот же head с другой базой идёт отдельным прогоном; итог
+    без base, но с той же mb (полный набор вместо узкого при подменённой истории) — тот же прогон."""
     d = os.path.realpath(d)
     now = P.now()
     for qdir, _w in queue_dirs():
@@ -4315,7 +4326,9 @@ def live_test(d, sha, script=None, pin=False, base=None, app=None):
                     continue
                 if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
                         or res.get("script") != script or res.get("app") != app or bool(res.get("pin")) != pin \
-                        or res.get("base") != base:
+                        or (res.get("base") != base and not (
+                            base and res.get("base") is None and mb and res.get("mb") == mb)) \
+                        or (mb and res.get("mb") and res["mb"] != mb):
                     continue
                 where = res.get("src") or res.get("dir")
                 if not isinstance(where, str) or os.path.realpath(where) != d:
