@@ -20,7 +20,7 @@ __all__ = [
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
     "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
     "CRITERIA", "CRITERIA_FMT", "CRITERIA_STUB", "review_criteria_ticks", "review_ready", "review_delta",
-    "review_criteria_probes",
+    "review_criteria_probes", "review_rounds", "review_loop", "REVIEW_LOOP_ROUND", "REVIEW_LOOP_AGE",
 ]
 
 
@@ -613,6 +613,48 @@ def review_pending(repo, pr, recs=None):
                 and repo.lower() in [str(x).lower() for x in r.get("repo") or []]:
             return None  # вердикт на тот же sha — ревью кончилось; на другой — head сменился, метка устарела
     return d
+
+
+# metis-1347 (приём PurpleFlow п. 1, разбор metis-1339): петля ревью видна из кода, а не только по правилу
+# merge-rounds.md (круг 3 — «сузить», круг 4 и дальше — только словом владельца). Круг — один проверенный head, как в
+# metrics.argus_info: все вердикты на тот же SHA — один круг; итог круга «вернуть», если последний вердикт хоть одного
+# argus на нём «вернуть». Новой ступени нет: только тревога лиду и Метиде, шлюз её не читает.
+REVIEW_LOOP_ROUND = 3
+REVIEW_LOOP_AGE = 3 * 24 * 3600   # с: PR, где последний вердикт старше, не тревожит (давно слитые и брошенные)
+
+
+def review_rounds(recs):
+    """Записи шлюза → {(repo, PR): [(sha, «вернуть»|«принять», epoch последнего вердикта круга)…]} по порядку кругов."""
+    per = {}
+    for r in recs:
+        if r.get("kind") not in ("accept", "reject") or not isinstance(r.get("pr"), int):
+            continue
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
+        for repo in r.get("repo") or []:
+            shas = per.setdefault((str(repo).lower(), r["pr"]), {})
+            v = shas.setdefault(str(r.get("sha")), {"argus": {}, "t": None})
+            v["argus"][str(by.get("agent_id") or by.get("session_id") or "")] = r["kind"]
+            v["t"] = _record_epoch(r)
+    return {k: [(sha, "вернуть" if "reject" in v["argus"].values() else "принять", v["t"]) for sha, v in shas.items()]
+            for k, shas in per.items()}
+
+
+def review_loop(t=None):
+    """Проверка дежурного (watch): PR, у которого круг REVIEW_LOOP_ROUND и дальше кончился «вернуть», — тревога один
+    раз на круг (alert_once по SHA): лиду и Метиде — сузить PR или спросить владельца. Возвращает ключи тревог."""
+    t = P.now() if t is None else t
+    out = []
+    for (repo, pr), rounds in sorted(review_rounds(P.review_records()).items()):
+        sha, last, when = rounds[-1]
+        if len(rounds) < REVIEW_LOOP_ROUND or last != "вернуть" or when is None or not 0 <= t - when < REVIEW_LOOP_AGE:
+            continue
+        key = f"review-loop-{repo}#{pr}"
+        P.alert_once(key, sha, f"петля ревью {repo}#{pr}: круг {len(rounds)} кончился «вернуть» (head {sha[:8]}, "
+                     f"«вернуть» на {sum(k == 'вернуть' for _, k, _ in rounds)} из {len(rounds)} кругов) — лиду и "
+                     "Метиде: сузить PR или спросить владельца; круг 4 и дальше — только словом владельца "
+                     "(roles/_ref/merge-rounds.md)", "watch")
+        out.append(key)
+    return out
 
 
 # metis-0513: запись tests пишет хук guard, когда команда вернулась. Инструмент Bash обрывает вызов на 600 с и хук не видит

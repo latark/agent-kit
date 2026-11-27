@@ -3572,9 +3572,16 @@ def window_push_judged(texts, cwd, moved=False, cmd=""):
         return True
     if _git_cfg_moves_remote(texts) or _PUSH_CFG_ENV.search(cmd or ""):
         return True
-    remote, i = None, 0
+    remote, flag, i = None, None, 0
     while i < len(args):
         a = args[i]
+        # --repo X и --repo=X (и сокращение --rep) — тот же <repository>, что слово после push (metis-1388, Д2 argus
+        # #545): судится и он
+        name, eq, val = a.partition("=")
+        if name in ("--rep", "--repo"):
+            flag = val if eq else args[i + 1] if i + 1 < len(args) else None
+            i += 1 if eq else 2
+            continue
         if a in _PUSH_OPT_ARG:
             i += 2
             continue
@@ -3583,11 +3590,14 @@ def window_push_judged(texts, cwd, moved=False, cmd=""):
             break
         i += 1
     d = _expand(gdir, cwd) if gdir else cwd
-    if not remote:
+    if not remote and not flag:
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
         remote = up.split("/", 1)[0] if "/" in up else "origin"
-    urls = [remote] if re.search(r"[/:]", remote) else \
-        (_git_out(d, "remote", "get-url", "--push", "--all", remote) or "").splitlines()
+    urls = []
+    for r in (remote, flag):
+        if r:
+            urls += [r] if re.search(r"[/:]", r) else \
+                (_git_out(d, "remote", "get-url", "--push", "--all", r) or "").splitlines()
     repos = [_mg()._repo_tail(_mg()._remote_id(u)) if u.strip() else "" for u in urls]
     merge = _merge_repo_set()
     return not repos or any(not r or r in merge for r in repos)
@@ -5401,10 +5411,25 @@ def check_worktree_own(event, tool, tool_input):
         # проекта не папки запуска расширили бы окно так же (metis-0915, Д3 argus 2 #360). Agent без них — молчит
         sub = tool_input.get("cwd")
         at = _expand(sub, cwd) if isinstance(sub, str) and sub else cwd
-        if tool_input.get("isolation") != "worktree" and at == cwd:
+        iso = tool_input.get("isolation") == "worktree"
+        if not iso and at == cwd:
             return None
-        repo, found = _cwd_widening(at, doms, win, launch)
-        return _widen_msg(repo, found) if found else None
+        # куда субагент пишет — папка cwd, а не только копия (metis-1391, Д3 argus #545): cwd вне папок своего
+        # направления (чужое направление, вне directions.toml) — отказ, кроме временных папок окна ($TMPDIR, /tmp,
+        # $PANTHEON_TMP; корень, в котором сам HOME, временным не считается)
+        tmp = [r for r in (os.path.realpath(p) for p in (*TEMP_ROOTS, os.environ.get("PANTHEON_TMP")) if p)
+               if not _inside(HOME, [r])]
+        owner = _owner(at, doms)[1]
+        if at != cwd and owner != win and not _inside(at, tmp):
+            where = f"папка направления {owner}" if owner else f"вне папок направления {win} (directions.toml, folders)"
+            return (f"Правило worktree-own: Agent с cwd {at} — {where}; субагент окна пишет только в папки своего "
+                    "направления (metis-1391). Другой репозиторий — задача его направлению, а не вопрос владельцу.")
+        # isolation — копия репозитория папки сессии, cwd — папка субагента: настройки судятся у обеих
+        for d in ([cwd] if iso else []) + ([at] if at != cwd else []):
+            repo, found = _cwd_widening(d, doms, win, launch)
+            if found:
+                return _widen_msg(repo, found)
+        return None
     if not isinstance(raw, str) or not raw:
         # name — новая worktree самим Claude Code, мимо проверок `pantheon worktree add`: окну направления закрыто
         # (решение владельца 15.11, вариант А metis-1225; П9b в pantheon.py снимает deny только ради path)
