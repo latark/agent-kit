@@ -183,7 +183,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     пачку», «новая пачка из N задач», «дубли — объединить?»: общие файлы, похожесть, ссылки, общий PR; без
                     модели. Без --apply ничего не пишет; --apply прикрепляет только «уверенно» в существующую пачку
                     (уже стоящий parent не переносит). task new без --parent подсказывает пачку (stderr), pantheon check
-                    тревожит на задачи без пачки старше суток (кроме «ждёт владельца»; STATE/no-parent-seen.json)
+                    пишет раз в сутки одну строку «вне плана: N» — задачи без пачки старше суток (кроме «ждёт
+                    владельца») и открытые пачки без раздела в плане направления (metis-1378)
   pantheon batch-suggest run [--force]  плановая сводка раз в 3–4 суток: сама прикрепляет «уверенные» (журнал задачи и пачки),
                     пишет Доска/Пачки-предложения.md (задача расписания)
   pantheon task failures [--days 7]   (metis-0859) сводка по классам: счётчики строк журнала «провал: <класс> — <довод>»
@@ -9306,32 +9307,33 @@ NO_PARENT_AGE = 86400
 
 def check_no_parent(T, quiet):
     """Открытая задача type task без parent, созданная больше суток назад и не раньше NO_PARENT_FROM (metis-0940, слово
-    владельца 06.11). Тик (quiet) — одна тревога на пачку новых номеров, каждый номер один раз (STATE/no-parent-seen.json,
-    ушедшие из списка забываются); руками — предупреждение со всем списком. → список номеров.
-    Не в списке: задача «ждёт» владельца (waiting_on=human, это вопрос ему, пачка не поможет). Тревога называет первые
-    ALERT_IDS номеров и помечает виденными только их: остальные придут следующим тиком (скрытые не считаются виденными)."""
+    владельца 06.11) и открытые пачки без раздела в плане направления (plancheck.uncovered_packs, metis-1378).
+    Тик (quiet) — не больше одной строки «вне плана: N — номера» в сутки (alert_daily, ключ «no-plan»): раньше тревога шла
+    каждым новым номером. Руками — предупреждение со всем списком. → список номеров задач без пачки.
+    Не в списке: задача «ждёт» владельца (waiting_on=human, это вопрос ему, пачка не поможет). Строка называет первые
+    ALERT_IDS номеров, остальные — «и ещё N»."""
     t = now()
-    ids = sorted(tid for tid, (_, h, _) in T.load_tasks(PANTHEON, T.WORK_TYPES).items()
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ids = sorted(tid for tid, (_, h, _) in tasks.items()
                  if h.get("type") == "task" and h.get("status") not in ("done", "dropped", "inbox")
                  and not (h.get("status") == "waiting" and h.get("waiting_on") == "human")
                  and not h.get("parent") and not h.get("batch") and str(h.get("created") or "") >= NO_PARENT_FROM
                  and t - (T.ts_of(h.get("created")) or t) > NO_PARENT_AGE)
+    try:
+        packs = _plugin_map_mod("plancheck").uncovered_packs(PANTHEON, tasks, t, T)
+    except Exception:  # план не должен ронять check: сверка пачек — подсказка, а не защита
+        packs = []
     if not quiet:
         if ids:
             print(f"предупреждение · задачи без пачки старше суток: {_ids_text(ids)} — pantheon task batch-suggest, "
                   "затем pantheon task set ID parent=… mode=single mode_why=…")
+        if packs:
+            print(f"предупреждение · пачки вне плана: {_ids_text(packs)} — pantheon plan check ФАЙЛ")
         return ids
-    seen = read_json(path("no-parent-seen.json"), [])
-    seen = seen if isinstance(seen, list) else []
-    fresh = [i for i in ids if i not in seen][:ALERT_IDS]  # показанные в тревоге; хвост — следующим тиком
-    rest = len([i for i in ids if i not in seen]) - len(fresh)
-    if fresh:
-        alert(f"задачи без пачки старше суток: {_ids_text(fresh)}{f' и ещё {rest}' if rest else ''} — положить в пачку: pantheon task batch-suggest, "
-              "затем pantheon task set ID parent=… mode=single mode_why=…", "check")
-    keep = sorted(set(seen) & set(ids) | set(fresh))
-    if keep != sorted(seen):
-        os.makedirs(STATE, exist_ok=True)
-        write_json(path("no-parent-seen.json"), keep)
+    both = ids + packs
+    if both:
+        parts = ([f"задачи без пачки {_ids_text(ids)}"] if ids else []) + ([f"пачки без раздела в плане {_ids_text(packs)}"] if packs else [])
+        alert_daily("no-plan", f"вне плана: {len(both)} — " + "; ".join(parts), "check")
     return ids
 
 

@@ -256,3 +256,23 @@ def board_rows(pantheon, tasks, t=None):
         if found:
             out.append((base, len(found), [describe(p, board=True) for p in found[:MAX_BOARD_ITEMS]]))
     return out
+
+
+def uncovered_packs(pantheon, tasks, t, T):
+    """Открытые пачки (story, не цели) направлений, у которых есть план, а раздела-пачки с ними нет → [id] (metis-1378).
+    Раздел покрывает пачку, если его карточка найдена (ссылка, поле story/пачка или имя в «ёлочках»). Направление без
+    плана не в счёт: сверять не с чем. План не прочитан — направление пропущено, а не «всё вне плана»."""
+    covered, planned = set(), set()
+    for path, name in plans(pantheon, t):
+        try:
+            secs = sections(_read(path))
+        except (OSError, UnicodeDecodeError):
+            continue
+        planned.add(name)
+        for sec in secs:
+            sid = sec["story"] or _story_by_name(sec, tasks)
+            if sid:
+                covered.add(sid)
+    return sorted(sid for sid, (_, h, _) in tasks.items()
+                  if h.get("type") == "story" and h.get("status") not in CLOSED and h.get("direction") in planned
+                  and sid not in covered and not T.is_goal(sid, tasks))
