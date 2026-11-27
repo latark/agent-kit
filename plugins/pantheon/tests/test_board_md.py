@@ -587,5 +587,22 @@ big2 = B.render(dict(data, prs=[{"number": i, "repo": "o/r", "head": "abc1234", 
 B.BLOCK_MAX = _bm
 check("1005. при переполнении «Сейчас» остаётся (режется хвост)", len(big2) <= B.BLOCK_MAX and "**Сейчас " in big2 and "не вошло строк" in big2)
 
+# --- 0920: ручные страницы без правки дольше 3 дней ---------------------------------------------------------------
+check("0920. stale_pages: 4 дня → в списке, ровно 3 и свежая → нет, файла нет → молча",
+      MD.stale_pages({"backlog.md": NOW - 4 * 86400 - 5, "decision-map.md": NOW - 3 * 86400}, NOW) == [("backlog.md", 4)]
+      and MD.stale_pages({"backlog.md": None}, NOW) == [], MD.stale_pages({"backlog.md": NOW - 4 * 86400}, NOW))
+write(bm, board())
+bl, dm = write(os.path.join(home, "backlog.md"), "# б\n"), write(os.path.join(home, "decision-map.md"), "# к\n")
+os.utime(bl, (NOW - 5 * 86400, NOW - 5 * 86400))
+os.utime(dm, (NOW - 3600, NOW - 3600))
+r = cli(["check"])
+check("0920. check: backlog.md без правки 5 дней → предупреждение, свежая decision-map.md — нет",
+      "backlog.md: без правки 5 дн." in r.stdout and "decision-map.md: без правки" not in r.stdout, r.stdout + r.stderr)
+r = cli(["check", "--quiet"])
+check("0920. check --quiet: тревога по backlog.md", "backlog.md: без правки 5 дн." in r.stdout, r.stdout + r.stderr)
+os.utime(bl, (NOW - 3600, NOW - 3600))
+r = cli(["check"])
+check("0920. страницу поправили → предупреждения нет", "без правки" not in r.stdout, r.stdout + r.stderr)
+
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

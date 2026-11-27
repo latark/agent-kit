@@ -8590,6 +8590,28 @@ def board_md_check(quiet):
             clear_once(f"check-board-md-{k}")
 
 
+def manual_pages_check(quiet):
+    """Ручные страницы ~/ai/pantheon (backlog.md, decision-map.md) без правки дольше 3 дней (metis-0920). Тик (quiet) —
+    одна тревога на страницу; руками — предупреждения. Файла нет — молча."""
+    mt = {}
+    for name in boardmd_mod().MANUAL_PAGES:
+        try:
+            mt[name] = os.stat(os.path.join(PANTHEON, name)).st_mtime
+        except OSError:
+            mt[name] = None
+    late = dict(boardmd_mod().stale_pages(mt, now()))
+    for name in boardmd_mod().MANUAL_PAGES:
+        key = "check-manual-page-" + name.removesuffix(".md")
+        if name in late:
+            text = f"{name}: без правки {late[name]} дн. (предел {boardmd_mod().MANUAL_STALE_DAYS}) — обновить страницу или убрать из ручных"
+            if quiet:
+                alert_once(key, str(late[name]), text, "check")
+            else:
+                print(f"предупреждение · {text}")
+        else:
+            clear_once(key)
+
+
 def _file_mark(st):
     """Отметка файла для сверки «не изменился ли»: inode (замена через rename), mtime в нс и размер."""
     return (st.st_ino, st.st_mtime_ns, st.st_size)
@@ -9462,6 +9484,7 @@ def check(paths=None, quiet=False):
                           "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
     if not paths:
+        manual_pages_check(quiet)  # backlog.md и decision-map.md без правки дольше 3 дней (metis-0920)
         board_md_check(quiet)  # board.md: размер «Сейчас», дата «Обновлено», сроки «По датам» (metis-0769)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
