@@ -391,10 +391,7 @@ def tick(t):
 
 
 def _alert(fail):
-    if fail:
-        P.alert_once(ALERT_KEY, fail[:300], "карта тестов: " + fail[:300], WHO)
-    else:
-        P.clear_once(ALERT_KEY)
+    P.alert_net(ALERT_KEY, fail[:300] if fail else None, "карта тестов: " + (fail or "")[:300], WHO)  # metis-1386
 
 
 if __name__ == "__main__":

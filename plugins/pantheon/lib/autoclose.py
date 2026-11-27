@@ -101,15 +101,22 @@ def gh_exe(env=None):
     return e.get("PANTHEON_GH") or shutil.which("gh", path=e.get("PATH"))
 
 
+_NET_RE = re.compile(r"unexpected EOF|\bEOF\b|TLS handshake|SSL_ERROR|i/o timeout|Connection (?:reset|refused)|"
+                     r"HTTP 50[234]", re.I)
+
+
 def gh_json(args, env=None, timeout=90):
     """→ (данные, ошибка). gh нет или он упал — (None, текст)."""
     exe = gh_exe(env)
     if not exe:
         return None, "gh не найден в PATH"
-    try:
-        r = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout, env=env)
-    except (OSError, subprocess.SubprocessError) as e:
-        return None, f"gh не запустился: {type(e).__name__}"
+    for attempt in (0, 1):  # metis-1381: разовый обрыв сети (EOF, TLS handshake timeout) — один повтор
+        try:
+            r = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout, env=env)
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, f"gh не запустился: {type(e).__name__}"
+        if r.returncode == 0 or attempt or not _NET_RE.search(r.stderr or r.stdout or ""):
+            break
     if r.returncode != 0:
         return None, (r.stderr or r.stdout or f"код {r.returncode}").strip()[:200]
     try:
