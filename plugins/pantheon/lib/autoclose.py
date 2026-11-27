@@ -12,6 +12,7 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
+Пустой actual у уже закрытой по слиянию задачи (сбой второй правки close_done) дописывает backfill_actual (metis-1401).
 В теле PR «часть <id>» или «часть №<номер>» — PR закрывает только часть задачи: его задачи не закрываются (и close_checked,
 metis-0660). Слово «часть» без номера рядом («личная часть карты») не в счёт (metis-1193, PART_RE).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
@@ -659,6 +660,7 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None, acce
                     review_pr(pantheon, t, repo, pr, repo_dirs[repo], T, log, errors)
         tick_backlog(pantheon, t, merged, repo_dirs, T, accepted, log, errors, probes, released)
         close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids)
+        backfill_actual(pantheon, t, T, actual_for, log, errors)
         probe_release(pantheon, t, T, released, log, errors)
         finished = True
     finally:  # сбой посреди прохода (не только ValueError): отметки уже обработанных PR не теряем, кэш прочтём заново
@@ -841,6 +843,26 @@ def close_done(pantheon, t, tid, task, repo, pr, T, actual_for, why=""):
             val = None
         T.task_set(pantheon, t, tid, {"actual": val or NO_METRIC}, actor="плановый проход")
     return True
+
+
+def backfill_actual(pantheon, t, T, actual_for, log, errors):
+    """metis-1401: закрытая по слиянию задача без actual — дописать из учёта или «нет замера». close_done пишет release и
+    actual двумя правками, и сбой второй (задача изменилась, блокировка) оставлял actual пустым навсегда: журнальная
+    отметка закрытия не даёт close_done вернуться. Идемпотентно: правит только пустое поле, updated не двигает."""
+    for tid, (_, head, body) in sorted(T.load_tasks(pantheon, T.WORK_TYPES).items()):
+        if (head.get("status") != "done" or head.get("actual") or T.CLOSED_BY_MERGE not in (body or "")
+                or str(head.get("closed") or "") < T.RELEASE_FIELDS_FROM):
+            continue
+        try:
+            val = None
+            try:
+                val = actual_for(tid) if actual_for else None
+            except Exception:  # noqa: BLE001 — учёт не должен мешать
+                val = None
+            T.task_set(pantheon, t, tid, {"actual": val or NO_METRIC}, actor="плановый проход", keep_updated=True)
+            log.append(f"{tid}: actual дописан ({val or NO_METRIC})")
+        except ValueError as e:  # повторим на следующем проходе
+            errors[f"actual {tid}"] = str(e)
 
 
 # PR в журнале задачи (metis-0583): «PR #163», «PR 163», «…/pull/163», «owner/repo#163»
