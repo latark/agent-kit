@@ -189,20 +189,29 @@ def quiet(event, mode):
     return name == "PreToolUse" and strict_covers(event)
 
 
-def _log_load(mode, e):
+def _log_load(mode, e, stage="load"):
     try:
         tb, line = e.__traceback__, 0
         while tb is not None:
             line, tb = tb.tb_lineno, tb.tb_next
         os.makedirs(os.path.dirname(FAIL_LOG), exist_ok=True)
         with open(FAIL_LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{mode}\tload\t{type(e).__name__}:{line}\n")
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{mode}\t{stage}\t{type(e).__name__}:{line}\n")
     except Exception:
         pass
 
 
 def _stop(event):
     return 0 if event is not None and event.get("hook_event_name") == "Stop" else 2
+
+
+def _refuse(mode, e, event, stage, what, why):
+    """Сбой самого входа: запись в лог, причина в stderr, код 2 (на Stop — 0). Не возвращается."""
+    _log_load(mode, e, stage)
+    sys.stderr.write(f"guard: {what} ({type(e).__name__}) — действие остановлено. Сообщи координатору или "
+                     f"владельцу: {why}.\n")
+    sys.stderr.flush()
+    os._exit(_stop(event))
 
 
 def run(argv, raw=None):
@@ -218,27 +227,26 @@ def run(argv, raw=None):
 
     signal.signal(signal.SIGALRM, out_of_time)
     signal.setitimer(signal.ITIMER_REAL, DEADLINE)
-    if raw is None:
-        raw = sys.stdin.buffer.read()
-    event = parse(raw)
-    if event is not None:
+    try:  # всё тело входа под перехватом (metis-0613): сбой вне него дал бы код 1, а управляемая копия пропускает
+        if raw is None:
+            raw = sys.stdin.buffer.read()
+        event = parse(raw)
+        if event is not None:
+            try:
+                if mode == "strict":
+                    note_strict(event)
+                elif quiet(event, mode):
+                    os._exit(0)
+            except Exception:
+                pass  # не решилось — полная проверка, как раньше
         try:
-            if mode == "strict":
-                note_strict(event)
-            elif quiet(event, mode):
-                os._exit(0)
-        except Exception:
-            pass  # не решилось — полная проверка, как раньше
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-        import guard_rules
-    except BaseException as e:  # noqa: B036 — сбой загрузки защиты: отказ с причиной, а не трассировка с кодом 1
-        _log_load(mode, e)
-        sys.stderr.write(f"guard: сбой загрузки guard ({type(e).__name__}) — действие остановлено. Сообщи "
-                         "координатору или владельцу: защита не загрузилась.\n")
-        sys.stderr.flush()
-        os._exit(_stop(event))
-    guard_rules.run_hook(raw)
+            sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+            import guard_rules
+        except BaseException as e:  # noqa: B036 — сбой загрузки защиты: отказ с причиной, а не трассировка с кодом 1
+            _refuse(mode, e, event, "load", "сбой загрузки guard", "защита не загрузилась")
+        guard_rules.run_hook(raw)
+    except BaseException as e:  # noqa: B036 — закрытый stdin, guard_rules без run_hook и т. п.: отказ, а не код 1
+        _refuse(mode, e, event, "run", "сбой входа guard", "проверка не выполнена")
 
 
 configure()
