@@ -4282,7 +4282,10 @@ def stale_windows(agents, doms, m):
         name = a["name"]
         if name in pending:
             continue
-        env = (P.read_json(P.path("settings", "run", name + ".json"), {}) or {}).get("env") or {}
+        run = P.read_json(P.path("settings", "run", name + ".json"), {})
+        env = run.get("env") if isinstance(run, dict) else None
+        if not isinstance(env, dict):
+            continue  # битый файл запуска (не словарь) — не сверяем, проход не срываем
         was, win = env.get("PANTHEON_BUILD"), env.get("PANTHEON_WINDOW")
         if not isinstance(was, str) or not isinstance(win, str) or not P.SESSION_NAME.fullmatch(win):
             continue
@@ -4293,7 +4296,8 @@ def stale_windows(agents, doms, m):
         if cur == was:
             continue
         out.append((name, was, cur))
-        P.alert_daily(f"window-stale-{name}-{cur}", f"Зевсу: перезапустить {name} — окно поднято со сборкой {was}, "
+        was_txt = was if re.fullmatch(r"[0-9a-f]{16}", was) else "неизвестной"  # в текст — только настоящий отпечаток
+        P.alert_daily(f"window-stale-{name}-{cur}", f"Зевсу: перезапустить {name} — окно поднято со сборкой {was_txt}, "
                       f"текущая {cur} (исключения песочницы, запреты или правила окна {win} сменились, на ходу сессия "
                       f"их не берёт). Сохраниться и подняться заново: попроси окно `pantheon saved`, затем pantheon "
                       f"stop {name} и pantheon resume {name}", "watch")
