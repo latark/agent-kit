@@ -918,18 +918,24 @@ def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
 ALERT_STREAK = 3  # сбоев сети подряд (проходов), после которых тревога пишется (metis-1381, 1386)
 NET_ERR_RE = re.compile(r"unexpected EOF|\bEOF\b|TLS handshake|SSL_ERROR|unable to access|Could not resolve host|timed out|"
                         r"TimeoutExpired|i/o timeout|Connection (?:reset|refused)|\bHTTP 50[234]\b", re.I)
+# metis-1407: отказ авторизации — постоянный сбой, а не сеть: git пишет его как «unable to access …: The requested URL
+# returned error: 403», и без этого исключения тревога шла бы лишь с третьего прохода и раз в сутки
+AUTH_ERR_RE = re.compile(r"returned error: 40[13]\b|\bHTTP 40[13]\b|Authentication failed|Bad credentials|"
+                         r"could not read Username|Permission denied", re.I)
 
 
 def net_error(text):
-    """Текст сбоя — разовая неполадка сети (EOF, TLS, таймаут, unable to access), а не ошибка в данных или коде."""
-    return bool(NET_ERR_RE.search(str(text)))
+    """Текст сбоя — разовая неполадка сети (EOF, TLS, таймаут, unable to access), а не ошибка в данных или коде.
+    Отказ авторизации (401, 403, Authentication failed) — не сетевой, даже рядом с «unable to access» (metis-1407)."""
+    return bool(NET_ERR_RE.search(str(text))) and not AUTH_ERR_RE.search(str(text))
 
 
 def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
     """Тревога о сетевом сбое только когда он держится n проходов подряд (metis-1381, 1386): разовый обрыв gh или fetch
     раньше давал строку на каждый всплеск (alert_once снимается на первом успехе). Счётчик — STATE/once/streak-<key>;
-    bad=False сбрасывает его; count=False (лёгкий тик по кэшу, который не ходит в сеть) счёт не растит. Строка — через
-    alert_fold по ключу: пока сбой держится, не чаще раза в сутки со счётчиком повторов. True — строка записана."""
+    bad=False сбрасывает его; count=False (лёгкий тик по кэшу, который не ходит в сеть) счёт не меняет — ни растит, ни
+    сбрасывает (metis-1402, 1406): серию ведёт только сетевой проход. Строка — через alert_fold по ключу: пока сбой
+    держится, не чаще раза в сутки со счётчиком повторов. True — строка записана."""
     mark = once_path("streak-" + key)
     try:
         with open(mark, encoding="utf-8") as fh:
@@ -937,7 +943,7 @@ def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
     except (OSError, ValueError):
         c = 0
     if not bad:
-        if c:
+        if c and count:
             clear_once("streak-" + key)
         return False
     if count:

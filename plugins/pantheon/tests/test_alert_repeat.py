@@ -9,7 +9,8 @@
 - 1384: срок задачи check не ниже TIMEOUT_FLOOR, как бы ни стоял timeout в schedule.toml;
 - 1385: тревога о длинных CLAUDE.md не повторяется при каждом изменении числа строк.
 Мутанты внутри теста (подмена исходника в копии lib/): без счётчика серии, без свёртки inbox, без пола срока, без
-свёртки инструкций, без повтора gh — набор краснеет.
+свёртки инструкций, без повтора gh, сброс серии при count=False (metis-1402, 1406), 403 как сетевой сбой (metis-1407)
+— набор краснеет.
 """
 import importlib
 import importlib.util
@@ -72,8 +73,10 @@ def streak_cases(P, out):
     out("серия: удача между сбоями сбрасывает счёт", not lines(P, "fetch:"), lines(P, "fetch:"))
     P.alert_streak("k", True, "fetch: " + TLS_ERR, "release-tick", count=False)
     out("серия: count=False (тик по кэшу) счёт не растит", not lines(P, "fetch:"), lines(P, "fetch:"))
+    P.alert_streak("k", False, "", "release-tick", count=False)  # metis-1402, 1406: тик по кэшу без своих ошибок
     P.alert_streak("k", True, "fetch: " + TLS_ERR, "release-tick")
-    out("серия: третий сбой подряд — одна строка", len(lines(P, "fetch:")) == 1, lines(P, "fetch:"))
+    out("серия: третий сбой подряд — одна строка (удача count=False серию не сбросила, metis-1402)",
+        len(lines(P, "fetch:")) == 1, lines(P, "fetch:"))
     for i in range(5):
         at(T0 + 300 + 60 * i)
         P.alert_streak("k", True, "fetch: " + TLS_ERR, "release-tick")
@@ -86,6 +89,14 @@ def streak_cases(P, out):
         all(P.net_error(x) for x in (EOF_ERR, TLS_ERR, "net/http: TLS handshake timeout"))
         and not P.net_error("Could not resolve to a Repository with the name x")
         and not P.net_error("gh вернул не JSON"), None)
+    auth = ("fatal: unable to access 'https://github.com/x/y/': The requested URL returned error: 403",
+            "gh: HTTP 403: Resource not accessible by integration (https://api.github.com/graphql)",
+            "fatal: Authentication failed for 'https://github.com/x/y/'")
+    out("net_error: отказ авторизации 403/401 — не сетевой, даже с «unable to access» (metis-1407)",
+        not any(P.net_error(x) for x in auth), [x for x in auth if P.net_error(x)])
+    P.alert_net("auth", "fetch: " + auth[0], "проба авторизации: 403", "pantheon-tick")
+    out("alert_net: 403 — тревога с первого прохода, а не с третьего (metis-1407)",
+        len(lines(P, "проба авторизации: 403")) == 1, lines(P, "проба авторизации"))
 
 
 def autoclose_cases(P, out):
@@ -99,10 +110,12 @@ def autoclose_cases(P, out):
     P.autoclose_alerts(["latark/x"], {})
     for i in range(3):
         P.autoclose_alerts(["latark/x"], {"latark/x": "gh pr list: " + EOF_ERR}, count=(i != 1))
+    P.autoclose_alerts(["latark/x"], {}, count=False)  # metis-1402: лёгкий тик без ошибок серию fetch не сбрасывает
     out("автозакрытие: тик по кэшу (count=False) серию не растит — на 3 вызова 2 счёта, тревоги нет",
         not lines(P, "автозакрытие задач"), lines(P, "автозакрытие задач"))
     P.autoclose_alerts(["latark/x"], {"latark/x": "gh pr list: " + EOF_ERR})
-    out("автозакрытие: сбой подряд на 3-м счёте — одна строка", len(lines(P, "автозакрытие задач")) == 1,
+    out("автозакрытие: сбой подряд на 3-м счёте — одна строка, лёгкий тик без ошибок между ними не сбросил",
+        len(lines(P, "автозакрытие задач")) == 1,
         lines(P, "автозакрытие задач"))
     P.autoclose_alerts(["latark/y"], {"latark/y#5": "закрытие задачи: нет такого поля"})
     out("автозакрытие: ошибка не сетевая — тревога сразу", len(lines(P, "нет такого поля")) == 1,
@@ -216,6 +229,8 @@ MUTANTS = {
     "без пола срока": ("jobs.py", 'TIMEOUT_FLOOR = {"check": 180}', "TIMEOUT_FLOOR = {}"),
     "без повтора gh": ("autoclose.py", "for attempt in (0, 1):", "for attempt in (1,):"),
     "net_error всегда нет": ("pantheon.py", "return bool(NET_ERR_RE.search(str(text)))", "return False"),
+    "count=False сбрасывает серию": ("pantheon.py", "if c and count:", "if c:"),  # metis-1402, 1406
+    "403 — сетевой сбой": ("pantheon.py", " and not AUTH_ERR_RE.search(str(text))", ""),  # metis-1407
 }
 
 
