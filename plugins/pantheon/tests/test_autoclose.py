@@ -1172,9 +1172,29 @@ def test_review_without_closes():
         shutil.rmtree(tmp, True)
 
 
+def test_backfill_actual():
+    """metis-1401: закрытая по слиянию задача с пустым actual получает его из учёта, иначе «нет замера»; прочие не трогаются."""
+    import types
+    rows = {"d-1": ("p1", {"status": "done", "closed": "2026-11-07", "release": "PR #1"}, "- закрыта по слиянию PR #1\n"),
+            "d-2": ("p2", {"status": "done", "closed": "2026-11-07", "actual": "x"}, "- закрыта по слиянию PR #2\n"),
+            "d-3": ("p3", {"status": "done", "closed": "2026-10-01"}, "- закрыта по слиянию PR #3\n"),
+            "d-4": ("p4", {"status": "done", "closed": "2026-11-07"}, "закрыта вручную\n"),
+            "d-5": ("p5", {"status": "done", "closed": "2026-11-08"}, "- закрыта по слиянию PR #5\n")}
+    calls = []
+    Tm = types.SimpleNamespace(load_tasks=lambda p, w: rows, WORK_TYPES=(), CLOSED_BY_MERGE=T.CLOSED_BY_MERGE,
+                               RELEASE_FIELDS_FROM=T.RELEASE_FIELDS_FROM,
+                               task_set=lambda p, t, tid, ch, **kw: calls.append((tid, ch, kw)))
+    log, errs = [], {}
+    A.backfill_actual("pan", T0, Tm, lambda tid: "$1.00" if tid == "d-1" else None, log, errs)
+    check("backfill_actual: пустой actual дописан из учёта или «нет замера», остальные не тронуты (metis-1401)",
+          [(c[0], c[1]["actual"]) for c in calls] == [("d-1", "$1.00"), ("d-5", "нет замера")] and not errs
+          and all(c[2].get("keep_updated") for c in calls), str(calls))
+
+
 def main():
     test_lists_and_checked()
     test_unit()
+    test_backfill_actual()
     test_board_problems_unit()
     test_board_problems_old_closed()
     test_attention_on_card()
