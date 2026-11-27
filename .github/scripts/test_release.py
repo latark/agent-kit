@@ -80,6 +80,8 @@ def repo():
     put(seed, "plugins/guard/hooks/a.py", "a = 1\n")
     put(seed, "plugins/pantheon/lib/b.py", "b = 1\n")
     put(seed, "README.md", "r\n")
+    with open(SCRIPT, encoding="utf-8") as fh:   # --push исполняет только себя из main (T7): main несёт те же байты
+        put(seed, R.SELF, fh.read())
     g(seed, "add", "-A")
     g(seed, "commit", "-qm", "init")
     subprocess.run(["git", "clone", "-q", "--bare", seed, origin], check=True, env=ENV)
@@ -230,7 +232,7 @@ def t_push_race():
     with open(hook, "w") as fh:
         fh.write("#!/bin/sh\n[ -f %s ] && exit 0\ntouch %s\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n"
                  "cd %s && git pull -q origin main && echo 'b = 2' > plugins/pantheon/lib/b.py && "
-                 "git commit -qam second && git push -q origin HEAD:main\nexit 0\n" % (marker, marker, other))
+                 "git -c user.name=t -c user.email=t@t commit -qam second && git push -q origin HEAD:main\nexit 0\n" % (marker, marker, other))
     os.chmod(hook, 0o755)
     rc, out = run(w, "--push")
     check("гонка: код 0 после повтора", rc == 0 and "попытка 1 не прошла" in out, out)
@@ -295,6 +297,35 @@ def t_push_from_main():
     g(w, "fetch", "-q", "origin")
     check("main: выпуск ушёл на origin/main", g(w, "log", "-1", "--format=%s", "origin/main").startswith("выпуск: ")
           and g(w, "rev-parse", "origin/main") == g(w, "rev-parse", "HEAD"), g(w, "log", "--oneline", "-3", "origin/main"))
+
+
+def t_self_from_main():
+    """T7 metis-0902 (мутант — убрать same_as_main): --push правленой копией скрипта — код 1, origin/main не тронут;
+    git скрипта без ~/.gitconfig и системного config."""
+    w, origin = repo()
+    merge_pr(w, {"plugins/guard/hooks/a.py": "a = 7\n"}, "code")
+    g(w, "push", "-q", "origin", "main")
+    before = g(w, "rev-parse", "origin/main")
+    evil = os.path.join(_ROOT, "evil-release", ".github", "scripts")
+    os.makedirs(evil, exist_ok=True)
+    with open(SCRIPT, encoding="utf-8") as fh:
+        text = fh.read()
+    with open(os.path.join(evil, "release.py"), "w", encoding="utf-8") as fh:
+        fh.write(text + "\n# правка ветки\n")
+    r = subprocess.run([sys.executable, "-I", os.path.join(evil, "release.py"), "--push"], cwd=w, capture_output=True,
+                       text=True, env=ENV)
+    out = r.stdout + r.stderr
+    g(w, "fetch", "-q", "origin")
+    check("T7: правленый release.py с --push — код 1, причина последней строкой, origin/main не тронут",
+          r.returncode == 1 and "не совпал" in out.strip().splitlines()[-1] and g(w, "rev-parse", "origin/main") == before,
+          out)
+    rc, out = run(w, "--push")
+    g(w, "fetch", "-q", "origin")
+    check("T7: тот же release.py, что в main, — выпуск идёт", rc == 0 and
+          g(w, "log", "-1", "--format=%s", "origin/main").startswith("выпуск: "), out)
+    env = R.git_env()
+    check("Н3: git release.py — GIT_CONFIG_GLOBAL=/dev/null и GIT_CONFIG_NOSYSTEM=1",
+          env.get("GIT_CONFIG_GLOBAL") == os.devnull and env.get("GIT_CONFIG_NOSYSTEM") == "1", env)
 
 
 def t_reconcile():
@@ -910,7 +941,7 @@ def t_workflows_on_bad_copies():
 
 
 
-for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_push_detach, t_push_from_main, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
+for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_push_detach, t_push_from_main, t_self_from_main, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
           t_wf_parse_selftest, t_workflows, t_workflows_on_bad_copies):
     try:
         t()

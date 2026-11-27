@@ -2414,7 +2414,8 @@ def light_merged(req, view):
     if req.get("restart") or not isinstance(view, dict) or str(view.get("state") or "").upper() != "MERGED" \
             or str(view.get("headRefOid") or "").lower() != req["sha"]:
         return False
-    return bool(req.get("light")) or light_paths(req["repo"], pr_files(req["repo"], req["pr"], view))
+    files = pr_files(req["repo"], req["pr"], view)   # файлы сейчас решают (metis-1302: ядро могло появиться после отметки)
+    return bool(req.get("light")) if files is None else light_paths(req["repo"], files)
 
 
 def nag(req, t):
@@ -2445,6 +2446,15 @@ def mark_light(req):
     """Отметка «вне ядра» — в файл заявки, только если её ещё нет (light_merged узнаёт по ней слитый мимо окна PR)."""
     if not req.get("light"):
         req["light"] = True
+        keep(req)
+
+
+def unmark_light(req, paths):
+    """В PR с отметкой light появились файлы ядра (metis-1302): отметку снять и записать — иначе заявка не истекала бы
+    (только nag) и light_merged снимал бы слитый PR ядра тихо. paths — свежий список файлов; None (не получен) —
+    не судим, отметка остаётся."""
+    if req.get("light") and paths is not None and not light_paths(req["repo"], paths):
+        req.pop("light", None)
         keep(req)
 
 
@@ -2611,6 +2621,7 @@ def process(req, click):
     if phrase is None and hold:
         return hold
     state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
+    unmark_light(req, paths)
     if state == "fail":
         if light_merged(req, view):
             return drop(req, "merged-outside", "PR вне ядра слит без окна")
@@ -2694,6 +2705,7 @@ def process_batch(reqs, click):
     views, whys, paths, waits, light = [], [], [], [], []
     for r in reqs:
         state, why, view, files = check_all(r)   # заново, на тот же head, у каждого PR пачки
+        unmark_light(r, files)
         if state == "fail":
             if light_merged(r, view):   # слит мимо окна PR пачки вне ядра — снять его тихо, остальные ждут дальше
                 rest = [x for x in reqs if x is not r]

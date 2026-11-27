@@ -29,7 +29,9 @@ shift
 if [ "$handler" != guard ]; then
     exec /bin/sh "$h/python.sh" "$h/$handler.py" "$@"
 fi
-if [ "${PANTHEON_HOOKD:-}" != 1 ]; then
+# GUARD_BRANCH=1 (проба guard ветки через --plugin-dir, metis-1227) — тоже медленный путь: демон судит кодом своего
+# дерева и клиенту из другого отвечает «F tree», а guard.py ветки должен проверить сам (guard.quiet)
+if [ "${PANTHEON_HOOKD:-}" != 1 ] || [ "${GUARD_BRANCH:-}" = 1 ]; then
     exec /bin/sh "$h/python.sh" "$h/guard.py" "$@"
 fi
 
