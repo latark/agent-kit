@@ -650,6 +650,42 @@ print(json.dumps({{
           f"{r.returncode} {e.argv()!r}")
     e.close()
 
+    # metis-0924 (1): ручной откат — verified 1.2.0 новее установленной 1.0.0; каталог 1.1.0 между ними не ставится
+    # (мутант: «старая» = установленная — update вызывается)
+    e = Env("1.0.0", "1.1.0", name="pantheon")
+    e.py("P.verified_write('pantheon', sys.argv[2], P._tree_hash(sys.argv[2]), '1.2.0', 'test')", e.src)
+    r = e.run()
+    check("verified новее установленной (откат): промежуточный каталог не ставится, update не вызван",
+          r.returncode == 0 and "plugin update" not in e.argv() and (e.verified().get("pantheon") or {}).get("version") == "1.2.0",
+          f"{r.returncode} {e.argv()!r} {e.verified()}")
+    e.close()
+
+    # metis-0924 (2): подменённое установленное дерево на каждом проходе — КРИТИЧНО и уведомление один раз
+    # (мутант: P.alert вместо alert_once — вторая строка КРИТИЧНО)
+    e, old, cur = adopt_env("1.0.0")
+    e.write(os.path.join(e.after, "hooks", "evil.py"), "print('не проверялось')\n")
+    e.run()
+    n1, note1 = e.alerts().count("КРИТИЧНО"), e.notified().count("непроверенная")
+    e.run()
+    e.run()
+    check("подменённое дерево: КРИТИЧНО в alerts один раз за три прохода, уведомление не повторяется",
+          n1 == 1 and e.alerts().count("КРИТИЧНО") == 1 and e.notified().count("непроверенная") == note1,
+          f"{n1} {e.alerts()!r} {note1} {e.notified()!r}")
+    e.write(os.path.join(e.after, "hooks", "evil2.py"), "print('другое')\n")
+    e.run()
+    check("другое содержимое подмены: тревога снова", e.alerts().count("КРИТИЧНО") == 2, e.alerts())
+    e.close()
+
+    # metis-0924 (3): мусорная версия в verified.json не роняет проход и не выше настоящей
+    # (мутант: проверка isdigit вместо ASCII-регулярки — «1.²» берётся как старая, в journal «1.² → 1.1.0»)
+    e = Env("1.0.0", "1.1.0", name="pantheon")
+    e.py("P.verified_write('pantheon', sys.argv[2], P._tree_hash(sys.argv[2]), '1.\u00b2', 'test')", e.src)
+    r = e.run()
+    check("мусорная версия в verified: проход не падает, старая — установленная, выпуск ставится",
+          r.returncode == 0 and "pantheon 1.0.0 → 1.1.0: обновлён" in e.journal() and "Traceback" not in r.stderr,
+          f"{r.returncode} {r.stderr[-200:]!r} {e.journal()!r}")
+    e.close()
+
     r = subprocess.run([PY, "-I", RUN_PY, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 

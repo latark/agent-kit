@@ -18,14 +18,14 @@ import time
 from datetime import datetime
 
 __all__ = [
-    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "NEW_ORDER_GOAL", "BLOCKED_GOAL", "WAITING_GOAL", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES",
+    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "NEW_ORDER_GOAL", "STALE_GOAL", "BLOCKED_GOAL", "WAITING_GOAL", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES",
     "load_pause",
     "PUSH_MAX_AGE", "resume_session", "transcript_path", "session_context", "fresh_reason", "latest_zeus_handoff",
     "state_files", "fresh_text", "fresh_target", "fresh_start", "_fresh_start", "copies_message", "name_holders",
     "_holder_text", "wait_name_free", "check_new_name", "start_at", "start", "_start_session", "OWNER_WORD_WINDOW",
     "OWNER_HEAD", "owner_word_heads", "owner_spoke_recently", "owner_spoke_before", "CAPACITY_SESSIONS_DONE",
     "capacity_probe", "capacity_log", "NO_WORD_WHY", "START_REQ", "START_REQ_KEYS", "start_request", "start_order", "cancel_request", "run_closed",
-    "take_start_requests", "resume_request", "hestia_request", "REQ_FRESH",
+    "take_start_requests", "workshop_request", "resume_request", "hestia_request", "REQ_FRESH",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
     "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake", "AGENTS_SILENT", "start_agents", "launch_snapshot",
     "agents_snapshot", "zeus_copies", "fresh_skip",
@@ -81,15 +81,25 @@ WAITING_GOAL = (" Для «Статус: готово» задача уходи�
                 "(после последнего сообщения, пришедшего в сессию): блокер мог закрыть, а owner сменить кто-то другой — "
                 "более ранняя «снята» устарела, задача в цели, пока свежая `pantheon task goal <id>` снова не скажет "
                 "«снята». Задачи в работе (doing) и в очереди (todo) — в цели «готово».")
+# metis-1357: текст цели задаётся один раз при старте (`/goal` в поручении) и потом не меняется — сменить его извне
+# нечем, кроме fresh_start при уходе задач самозапуска (metis-0631). Судья цели видит только транскрипт: 27.11 окно
+# Афины вернуло 8 раз подряд по условиям поручения, которые уже сняты (athena-0466 закрыта, сверка сделана и записана)
+# или зависят от ответа Зевса, пришедшего не в эту сессию («доставка не подтверждена»). Поэтому: условие поручения —
+# на последнее состояние, а не на текст при старте; и выход — после трёх возвратов подряд по одной причине отчёт
+# «заблокировано» с этой причиной и вопросом Зевсу цель отпускает (свои прежние возвраты судья видит в транскрипте).
+STALE_GOAL = (" Условие поручения — на последнее состояние: снятое позже (задача закрыта, ответ Зевса или владельца в "
+              "сессии, сделанное с датой в отчёте) цель не держит. После трёх возвратов подряд по одной причине "
+              "«Статус: заблокировано» с этой причиной и вопросом Зевсу достигает цели.")
 COORDINATOR_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и все "
                     "пункты чек-листа эпика в STATUS.md отмечены сделанными, либо «Статус: заблокировано» с названным "
-                    "блокером и вопросом владельцу или Зевсу." + BLOCKED_GOAL + WAITING_GOAL + NEW_ORDER_GOAL)
+                    "блокером и вопросом владельцу или Зевсу." + STALE_GOAL + BLOCKED_GOAL + WAITING_GOAL
+                    + NEW_ORDER_GOAL)
 # поручение названо явно (одна задача, проверка) — цель по нему, а не по эпику: иначе Stop-хук не отпустит сессию, пока
 # не закрыт весь чек-лист, и короткая проверка разрастается в эпик (живой запуск athena-0001 15.10)
 TASK_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и выполнен "
              "критерий «готово» этого поручения, либо «Статус: заблокировано» с названным блокером и вопросом владельцу "
-             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят — кроме нового поручения." + BLOCKED_GOAL + WAITING_GOAL
-             + NEW_ORDER_GOAL)
+             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят — кроме нового поручения." + STALE_GOAL + BLOCKED_GOAL
+             + WAITING_GOAL + NEW_ORDER_GOAL)
 
 
 OPEN_STATUSES = {"todo", "doing", "review"}  # «ждёт» не будят: ответа ещё нет
@@ -582,6 +592,76 @@ def start_order(target, text, dry=False):
     return 0
 
 
+# metis-1037: `pantheon start workshop <задача> ["поручение"]` в окне hq — заявка daedalus-<задача>.req ({workshop: задача},
+# при поручении — order: имя файла в ~/ai/pantheon/workshop/); текст — файлом, не в заявке (как start_order). Мастерская —
+# не направление реестра: плановый проход (_workshop_by_request) зовёт `pantheon start workshop` вне окна, от tick.
+WORKSHOP_PREFIX = "daedalus-"
+WORKSHOP_ORDER = re.compile(r"\d{4}-\d{2}-\d{2}-\d{6}-start-[0-9a-f]{6}\.md")
+
+
+def workshop_request(rest, dry=False):
+    """rest = [задача, слова поручения…] → 0, START_REFUSED (имя, флаг, пустое/длинное поручение), 1 (не записана)."""
+    task, words = (rest[0] if rest else ""), rest[1:]
+    if not P.SESSION_NAME.fullmatch(task):
+        print("pantheon start: workshop <задача> [поручение] — имя задачи: a-z, 0-9, дефис", file=sys.stderr)
+        return START_REFUSED
+    flag = next((a for a in words if START_FLAG_LIKE.fullmatch(a)), None)
+    if flag:
+        print(f"pantheon start: «{flag}» — не флаг start (флаги: --restart, --over-cap, --at, --at-list, --at-cancel, "
+              f"--from, --dry-run); поручение, начатое с «-», — одной строкой в кавычках: "
+              f"pantheon start workshop {task} \"{flag} …\"", file=sys.stderr)
+        return START_REFUSED
+    text = " ".join(words).strip()
+    if words and (not text or len(text.encode()) > START_ORDER_MAX):
+        print(f"pantheon start: поручение пустое или длиннее {START_ORDER_MAX} байт", file=sys.stderr)
+        return START_REFUSED
+    if dry:
+        print(f"pantheon start: заявка на мастерскую {task} была бы принята (--dry-run)")
+        return 0
+    t = P.now()
+    item = {"target": WORKSHOP_PREFIX + task, "time": P.stamp(t), "by": "zeus", "workshop": task}
+    if text:
+        name = datetime.fromtimestamp(t).strftime("%Y-%m-%d-%H%M%S") + f"-start-{os.urandom(3).hex()}.md"
+        d = os.path.join(P.PANTHEON, "workshop")
+        try:
+            if os.path.islink(d):
+                raise OSError("папка workshop — ссылка")
+            os.makedirs(d, exist_ok=True)
+            fd = os.open(os.path.join(d, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            try:
+                os.write(fd, (f"# Поручение из окна Пританея (pantheon start workshop {task})\nОт: Пританей, "
+                              f"{P.stamp(t)}\n\n{text}\n").encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            print(f"pantheon start: поручение мастерской {task} не записано ({e.strerror or e}) — окно не поднято",
+                  file=sys.stderr)
+            return 1
+        item["order"] = name
+    if not P.hq_mark(START_REQ, WORKSHOP_PREFIX + task + ".req", json.dumps(item, ensure_ascii=False) + "\n"):
+        print(f"pantheon start: заявка на мастерскую {task} не записана (строка выше) — окно не поднимется",
+              file=sys.stderr)
+        return 1
+    print(f"pantheon start: заявка принята, окно {WORKSHOP_PREFIX}{task} поднимется на следующем проходе")
+    return 0
+
+
+def _workshop_by_request(task, order):
+    """Плановый проход: `pantheon start workshop <задача> [поручение] --from tick` вне окна. → итог строкой."""
+    limit = P.watch_mod().start_timeout()
+    argv = [os.path.join(P.PLUGIN, "bin", "pantheon"), "start", "workshop", task]
+    if order:
+        argv.append(f"Прочитай ~/ai/pantheon/workshop/{order} и выполни поручение.")
+    try:
+        r = subprocess.run(argv + ["--from", "tick"], capture_output=True, text=True, timeout=limit, env=P.claude_env())
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        res = "поднята" if r.returncode == 0 else f"не вышло, код {r.returncode}" + (f": {tail[-1][:160]}" if tail else "")
+    except subprocess.TimeoutExpired:
+        res = f"pantheon start workshop не уложился в {limit:.0f} с"
+    P.alert(f"заявка Зевса: мастерская {WORKSHOP_PREFIX}{task} — {res}", "watch")
+    return res
+
+
 def cancel_request(oid):
     """metis-1009: отмена разового запуска из окна, которому STATE/oneshot.json закрыт, — строка {"cancel": id} в заявке
     STATE/hq-rw/start-req/<имя>.req; гасит плановый проход до разовых запусков. → 0, 1 (не записана), 2 (не тот id)."""
@@ -643,6 +723,12 @@ def _req_items(data, target):
         items = None
     if not items or any(not isinstance(x, dict) or x.get("target") != target or x.get("by") != "zeus" for x in items):
         return None, HESTIA_SHAPE if target == HESTIA else REQ_SHAPE
+    if target.startswith(WORKSHOP_PREFIX):  # metis-1037: мастерская — {workshop: задача[, order: файл поручения]}
+        ok = all(set(x) - {"workshop", "order"} == START_REQ_KEYS and isinstance(x.get("workshop"), str)
+                 and P.SESSION_NAME.fullmatch(x["workshop"]) and target == WORKSHOP_PREFIX + x["workshop"]
+                 and ("order" not in x or (isinstance(x["order"], str) and WORKSHOP_ORDER.fullmatch(x["order"])))
+                 for x in items)
+        return (items, None) if ok else (None, REQ_SHAPE + "; мастерская — ключи target, time, by, workshop, order")
     if target == HESTIA:
         ok = all(set(x) == HESTIA_REQ_KEYS and isinstance(x["task"], str) and P.tasks_mod().ID_RE.fullmatch(x["task"])
                  for x in items)
@@ -730,7 +816,8 @@ def take_start_requests(doms, t):
             data, bad = _start_req_read(dfd, fname)
             with contextlib.suppress(OSError):
                 os.unlink(fname, dir_fd=dfd)
-            if not bad and target != HESTIA:  # metis-1066: Гестия — служебная, её нет в реестре направлений
+            if not bad and target != HESTIA and not target.startswith(WORKSHOP_PREFIX):
+                # metis-1066: Гестия — служебная, её нет в реестре направлений; metis-1037: мастерская — тоже
                 bad = _start_req_problem(target, doms)
             items = None
             if not bad:
@@ -743,6 +830,10 @@ def take_start_requests(doms, t):
                 continue
             if target == HESTIA:
                 out.append((target, _hestia_by_request(items[-1]["task"])))
+                continue
+            if target.startswith(WORKSHOP_PREFIX):  # metis-1037: поднимает pantheon start workshop вне окна
+                last = items[-1]
+                out.append((target, _workshop_by_request(last["workshop"], last.get("order"))))
                 continue
             for oid in dict.fromkeys(x["cancel"] for x in items if "cancel" in x):  # metis-1009: отмена — до запуска
                 done = P.night_mod().oneshot_cancel(oid, t, "заявка Зевса (pantheon start --at-cancel)")
@@ -804,6 +895,8 @@ def start(rest):
         print(start.__doc__, file=sys.stderr)
         return 2
     target, rest = rest[0], rest[1:]
+    if role == "hq" and target == "workshop" and not (restart or over):
+        return workshop_request(rest, dry)  # metis-1037: заявка, окно поднимет плановый проход
     if role == "hq" and target not in ("zeus", "workshop") and not rest and not (restart or over):
         # metis-0771: из окна Пританея — заявка, окно поднимет плановый проход; metis-1009: --restart/--over-cap заявка
         # не несёт — они идут прежним путём (start_gate), а без записи STATE/settings/run — отказ одной строкой

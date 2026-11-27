@@ -442,6 +442,84 @@ try:
     check("1066 wake hestia --from zeus вне окна без вашего слова → отказ start_gate, код 2",
           rc == 2 and "без вашего слова" in err, (rc, out, err))
     os.environ["PANTHEON_ROLE"] = "hq"
+
+    # metis-1037: pantheon start workshop из окна hq — заявка daedalus-<задача>.req, без запуска сразу
+    G = P.take_start_requests.__globals__
+    real_ss = G["_start_session"]
+    started = []
+    G["_start_session"] = lambda *a, **k: started.append(a) or 0
+    wreq = os.path.join(qdir, "daedalus-vietnam-evisa.req")
+    wdir = os.path.join(P.PANTHEON, "workshop")
+    try:
+        rc, out, err = call(["workshop", "vietnam-evisa"])
+        wdata = [json.loads(x) for x in open(wreq).read().splitlines()] if os.path.exists(wreq) else []
+        check("1037 start workshop <задача> из hq → заявка без текста, код 0, _start_session не зван",
+              rc == 0 and "заявка принята" in out and not started and len(wdata) == 1
+              and set(wdata[0]) == {"target", "time", "by", "workshop"} and wdata[0]["workshop"] == "vietnam-evisa"
+              and wdata[0]["target"] == "daedalus-vietnam-evisa" and wdata[0]["by"] == "zeus", (rc, out, err, wdata))
+        os.unlink(wreq)
+        rc, out, err = call(["workshop", "vietnam-evisa", "подай анкету"])
+        wdata = [json.loads(x) for x in open(wreq).read().splitlines()] if os.path.exists(wreq) else []
+        ofiles = sorted(os.listdir(wdir)) if os.path.isdir(wdir) else []
+        check("1037 с поручением → файл в workshop/ и ключ order в заявке, текста в заявке нет",
+              rc == 0 and not started and len(wdata) == 1 and wdata[0].get("order") in ofiles and len(ofiles) == 1
+              and "подай анкету" in open(os.path.join(wdir, ofiles[0]), encoding="utf-8").read()
+              and "подай анкету" not in open(wreq).read(), (rc, out, err, wdata, ofiles))
+        for argv, why in ((["workshop"], "без задачи"), (["workshop", "../x"], "имя с путём"),
+                          (["workshop", "t1", "--force", "x"], "неизвестный флаг")):
+            os.unlink(wreq) if os.path.exists(wreq) else None
+            rc, out, err = call(argv)
+            check(f"1037 {why} → отказ код 2, заявки нет", rc == 2 and not os.path.exists(wreq) and not started,
+                  (rc, out, err))
+        rc, out, err = call(["workshop", "vietnam-evisa", "--dry-run"])
+        check("1037 --dry-run → заявки нет", rc == 0 and "была бы принята" in out and not os.path.exists(wreq), (rc, out, err))
+        rc, out, err = call(["workshop", "vietnam-evisa", "--restart"])
+        check("1037 --restart → не заявка (прежний путь)", not os.path.exists(wreq) and "заявка принята" not in out,
+              (rc, out, err))
+
+        # плановый проход: заявка → pantheon start workshop <задача> "Прочитай …/workshop/<order>…" --from tick
+        call(["workshop", "vietnam-evisa", "подай анкету"])
+        order = [json.loads(x) for x in open(wreq).read().splitlines()][0]["order"]
+
+        class WSub:
+            TimeoutExpired = subprocess.TimeoutExpired
+            seen = []
+
+            @classmethod
+            def run(cls, argv, **kw):
+                cls.seen.append((argv, kw.get("env") or {}))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+        real_sub = G["subprocess"]
+        G["subprocess"] = WSub
+        try:
+            got = dict(P.take_start_requests(doms, P.now()))
+        finally:
+            G["subprocess"] = real_sub
+        argv, env = WSub.seen[0] if WSub.seen else ([], {})
+        check("1037 проход: заявка → pantheon start workshop <задача> с текстом поручения --from tick, без роли окна",
+              argv[1:4] == ["start", "workshop", "vietnam-evisa"] and order in argv[4] and argv[-2:] == ["--from", "tick"]
+              and "PANTHEON_ROLE" not in env and got.get("daedalus-vietnam-evisa") == "поднята" and not os.path.exists(wreq),
+              (WSub.seen, got))
+        # подложенная заявка: чужой target/ключ → отклонена, запуска нет
+        for bad_line in ({"target": "daedalus-other", "time": P.stamp(P.now()), "by": "zeus", "workshop": "vietnam-evisa"},
+                         {"target": "daedalus-vietnam-evisa", "time": P.stamp(P.now()), "by": "zeus", "workshop": "vietnam-evisa",
+                          "text": "rm -rf"},
+                         {"target": "daedalus-vietnam-evisa", "time": P.stamp(P.now()), "by": "zeus", "workshop": "vietnam-evisa",
+                          "order": "../../x.md"}):
+            fname = bad_line["target"] + ".req"
+            with open(os.path.join(qdir, fname), "w") as fh:
+                fh.write(json.dumps(bad_line) + "\n")
+            del WSub.seen[:]
+            G["subprocess"] = WSub
+            try:
+                got = dict(P.take_start_requests(doms, P.now()))
+            finally:
+                G["subprocess"] = real_sub
+            check(f"1037 подложенная заявка {sorted(bad_line)[:1]}… → отклонена без запуска",
+                  not WSub.seen and got.get(bad_line["target"]) not in (None, "поднята"), (WSub.seen, got))
+    finally:
+        G["_start_session"] = real_ss
 finally:
     os.environ.pop("PANTHEON_ROLE", None)
     shutil.rmtree(_ROOT, ignore_errors=True)

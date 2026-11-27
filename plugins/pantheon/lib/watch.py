@@ -422,6 +422,7 @@ def _watch(dry=False):
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
+              ("основная копия agent-kit", lambda: main_copy(t)),
               ("кэши песочниц", lambda: sandbox_sweep(t)),
               ("версия Claude Code", lambda: cc_version(t)),
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
@@ -2019,6 +2020,65 @@ def worktrees(agents, registry, doms, t):
         P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
                      + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
                      + f"; журнал дня — {wt_archive('removed-' + today(t) + '.txt').replace(P.HOME, '~')}", "watch")
+
+
+MAIN_COPY_LAG = 86400        # основная копия agent-kit отстала от origin/main дольше — тревога (metis-1027)
+
+
+def main_copy(t):
+    """Основная копия agent-kit (AI_HOME/agent-kit) не должна стоять без ветки или отставать от origin/main (metis-1027:
+    неделя detached с 02.11). Без сети: берётся уже имеющийся origin/main. Чистое дерево на main — `merge --ff-only`
+    сам; иначе (detached, другая ветка, грязно, ff не вышел) — тревога один раз на состояние и ничего не трогаем:
+    detached — сразу, отставание — когда старейший недостающий коммит старше MAIN_COPY_LAG.
+    Проход идёт вне песочницы, а копию может править окно роли: git — только с явными GIT_DIR, GIT_COMMON_DIR и
+    GIT_WORK_TREE (как у копий, _copy_state), .git — настоящий каталог без commondir, перед status и merge —
+    unsafe_config. Иначе — тревога, git дальше не запускаем: фильтр или хук из чужого config ушёл бы вне песочницы."""
+    root = os.path.join(P.AI_HOME, "agent-kit")
+    gd = os.path.join(root, ".git")
+    if not os.path.lexists(gd):
+        return
+    short = root.replace(P.HOME, "~")
+    key = "watch-main-copy"
+    if os.path.islink(gd) or not os.path.isdir(gd) or os.path.lexists(os.path.join(gd, "commondir")):
+        P.alert_once(key, "gitdir", f"основная копия {short}: .git не каталог репозитория (файл, ссылка или "
+                     "commondir) — Метиде: выяснить, кто подменил; дежурный git там не запускает", "watch")
+        return
+    env = {"GIT_DIR": gd, "GIT_COMMON_DIR": gd, "GIT_WORK_TREE": root}
+    head = _git("-C", root, "symbolic-ref", "-q", "--short", "HEAD", env=env)
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    if not branch:
+        P.alert_once(key, "detached", f"основная копия {short} без ветки (detached HEAD) — Метиде: вернуть main и "
+                     "сдвинуть до origin/main; сам дежурный её не трогает", "watch")
+        return
+    if _git("-C", root, "rev-parse", "-q", "--verify", "origin/main^{commit}", env=env).returncode != 0:
+        return
+    lag = _git("-C", root, "log", "--reverse", "--format=%ct", "HEAD..origin/main", env=env)
+    stamps = lag.stdout.split() if lag.returncode == 0 else []
+    if not stamps:
+        P.clear_once(key)
+        return
+    bad = unsafe_config(root, env)
+    if bad:
+        P.alert_once(key, "config", f"основная копия {short}: в конфигурации git {bad} — Метиде: убрать; дежурный "
+                     "status и merge там не запускает", "watch")
+        return
+    clean = _git("-C", root, "status", "--porcelain", env=env)
+    if branch == "main" and clean.returncode == 0 and not clean.stdout.strip():
+        if _git("-C", root, "merge", "--ff-only", "origin/main", env=env).returncode == 0:
+            P.clear_once(key)
+            return
+        why = "fast-forward не вышел (у main есть свои коммиты)"
+    elif branch != "main":
+        why = f"стоит на ветке {branch}"
+    else:
+        why = "в дереве есть правки"
+    try:
+        age = t - int(stamps[0])
+    except ValueError:
+        return
+    if age > MAIN_COPY_LAG:
+        P.alert_once(key, f"lag-{branch}", f"основная копия {short} отстала от origin/main на {len(stamps)} коммит. "
+                     f"({age / 86400:.0f} дн.): {why} — Метиде: сдвинуть вручную", "watch")
 
 
 def _find_copy(path, roots):
@@ -4442,7 +4502,7 @@ def restart(rest, who):
                 skip.append(f"{n} (код {rc})")
         if not skip:
             maint_clear()
-        P.alert(f"технический перезапуск {'завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
+        P.alert(f"технический перезапуск{' завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
                 + (f"; не тронуты: {', '.join(skip)}" if skip else "")
                 + ("; Зевс — вы сами: pantheon start zeus --restart во вкладке iTerm" if owner else ""), "pantheon-restart")
         print(f"перезапущены: {', '.join(done) or 'никто'}" + (f"\nне тронуты: {', '.join(skip)} (--force — без отметки; "
@@ -4657,15 +4717,25 @@ def restart_merged(name, repo, pr, sha, who):
                        f"{name}?» и pantheon restart --only", f"Touch ID слияния {repo}#{pr}", who)
 
 
+def _same_process(a, rec):
+    """Запись a (агент или реестр имён) — тот же процесс, что записала метка rec: pid совпал и, если procStart есть с обеих
+    сторон, он тоже (pid мог достаться другому процессу)."""
+    if not rec.get("pid") or a.get("pid") != rec["pid"]:
+        return False
+    ps, rs = " ".join(str(a.get("procStart") or "").split()), " ".join(str(rec.get("procStart") or "").split())
+    return not (ps and rs) or ps == rs
+
+
 def zeus_renewed(names, saved):
     """metis-0338: Зевс (zeus*) поднят заново после `pantheon saved`. Признак — у каждого есть живая сессия с этим именем
-    (claude agents или реестр имён вкладок), и среди живых нет той, что записала saved (sessionId метки): после
-    `pantheon start zeus --restart` id другой. Метки с id нет — не знаем, False (тогда метку снимет --done)."""
+    (claude agents или реестр имён вкладок), и среди живых нет процесса, что записал saved (pid, а при наличии и procStart
+    метки): после `pantheon start zeus --restart` процесс другой. /clear даёт новый sessionId в том же процессе — это не
+    перезапуск (metis-0837, Д4), поэтому по sessionId не судим. Метки с pid нет — не знаем, False (метку снимет --done)."""
     agents, reg = P.agents_all() or [], P.sessions_registry()
     for n in names:
-        sid = (saved.get(n) or {}).get("sessionId")
+        rec = saved.get(n) or {}
         live = holders(n, agents, reg)
-        if not sid or not live or any(a.get("sessionId") == sid for a in live):
+        if not rec.get("pid") or not live or any(_same_process(a, rec) for a in live):
             return False
     return True
 
@@ -4714,6 +4784,10 @@ def hq_saved(name):
             out[k] = rec[k][:300]
     if isinstance(rec.get("sessionId"), str) and re.fullmatch(r"[0-9a-f-]{8,64}", rec["sessionId"]):
         out["sessionId"] = rec["sessionId"]
+    if isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) and rec["pid"] > 0:
+        out["pid"] = rec["pid"]
+    if isinstance(rec.get("procStart"), str):
+        out["procStart"] = rec["procStart"][:100]
     return out
 
 
@@ -4783,6 +4857,13 @@ def saved_cmd(rest, who):
     sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0421: restart --go продолжит именно эту сессию
         rec["sessionId"] = sid
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):  # metis-0837 Д4: процесс — признак перезапуска Зевса
+            for a in (P.agents_all() or []) + P.sessions_registry():
+                if a.get("sessionId") == sid and isinstance(a.get("pid"), int) and a["pid"] > 0:
+                    rec["pid"] = a["pid"]
+                    if a.get("procStart"):
+                        rec["procStart"] = str(a["procStart"])
+                    break
     if not _write_mark(name, P.path("maintenance", name + ".json"), rec):
         return 0 if name.startswith("zeus") else 1
     print(f"{name}: отмечено «сохранилась». Отчитайся Зевсу строкой (SendMessage zeus) и жди перезапуска: дальше "
