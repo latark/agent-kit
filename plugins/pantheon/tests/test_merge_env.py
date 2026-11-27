@@ -16,6 +16,28 @@ def test_env_home():
           r.returncode == 2 and not b.windows() and not b.merges() and b.req() is not None, r.stdout + r.stderr)
 
 
+def test_fallback_notify_body_1404():
+    """metis-1404: запасное уведомление несёт сводку тела PR строкой «Тело PR: …» (до 150 знаков), а у пачки (batch)
+    сводки нет: правка без строки или без отсечки batch краснит тест."""
+    b = Box()
+    real = os.path.realpath(b.home)
+    log1, log2 = os.path.join(b.tmp, "n1.log"), os.path.join(b.tmp, "n2.log")
+    code = ("import os, sys, types; sys.path.insert(0, %r); import pwd\n"
+            "pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=%r)\n"
+            "import pantheon as p; m = p.merge_mod(); m.clean_env()\n"
+            "os.environ['PANTHEON_NOTIFY_LOG'] = %r; m.fallback_notify({'summary': 'Чинит петлю ревью ' + 'x' * 300}, 'окно')\n"
+            "os.environ['PANTHEON_NOTIFY_LOG'] = %r; m.fallback_notify({'summary': 'Пачка задач', 'batch': True}, 'окно')\n"
+            % (LIBDIR, real, log1, log2))
+    env = dict(b.env(T0), HOME=real, PANTHEON_PYTHON=PY311)
+    r = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    one = open(log1).read() if os.path.exists(log1) else ""
+    two = open(log2).read() if os.path.exists(log2) else ""
+    check("fallback_notify: в тексте «. Тело PR: Чинит петлю ревью», сводка обрезана до 150 знаков",
+          ". Тело PR: Чинит петлю ревью x" in one and "x" * 140 not in one and "x" * 120 in one, one + r.stderr)
+    check("fallback_notify: у пачки (batch) строки «Тело PR:» нет, уведомление уходит", "Тело PR" not in two
+          and "Щёлкните — откроется окно Touch ID" in two, two + r.stderr)
+
+
 def test_env_clean():
     """Окружение прохода с нуля: всё, что не HOME и не постоянный PATH, снято; STATE и Пантеон — от HOME."""
     b = Box()

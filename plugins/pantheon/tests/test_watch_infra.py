@@ -733,6 +733,35 @@ def test_job_tempfail_reason_1180():
           f"1180: причина ожидания задачи watch: {r.returncode} {st.get('waiting')!r}")
 
 
+def test_review_loop_wired_1404():
+    """metis-1404: проверка «петля ревью argus» стоит и в полном проходе _watch, и в blind_checks (claude agents не
+    ответил), и вызывает P.review_loop(t): удаление вызова из любого места краснит тест."""
+    p, w = _watch_inproc()
+    d = tempfile.mkdtemp(prefix="rl-")
+    calls = []
+    seen = {}
+    w.domains = lambda: {}
+    w.agents_ok = lambda: None
+    w.agents_failed = lambda t, failed: 0
+    w.run_checks = lambda checks, t: seen.setdefault("checks", dict(checks)) and []
+    with _Patched(p, {}, STATE=d, review_loop=lambda t=None: calls.append(t), sessions_registry=lambda: {},
+                  agents_all=lambda: [], now=lambda: T0):
+        w._watch()
+        full = seen.pop("checks", {})
+        check("петля ревью argus" in full, f"1404: в полном проходе _watch нет проверки «петля ревью argus»: {sorted(full)}")
+        fn = full.get("петля ревью argus")
+        fn and fn()
+        check(calls == [T0], f"1404: проверка полного прохода не зовёт review_loop(t): {calls}")
+        calls.clear()
+        p.agents_all = lambda: None  # claude agents не ответил → blind_checks
+        w._watch()
+        blind = seen.pop("checks", {})
+        check("петля ревью argus" in blind, f"1404: в blind_checks нет проверки «петля ревью argus»: {sorted(blind)}")
+        fn = blind.get("петля ревью argus")
+        fn and fn()
+        check(calls == [T0], f"1404: проверка blind не зовёт review_loop(t): {calls}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)
