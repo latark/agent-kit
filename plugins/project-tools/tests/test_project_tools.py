@@ -542,6 +542,18 @@ for i, bad in enumerate(("строка", ["список"], {"source": "стро�
     check(f"маркетплейс не словарь ({json.dumps(bad, ensure_ascii=False)}): код 0, без трассы, заметка есть",
           r.returncode == 0 and "Traceback" not in r.stderr and "не меняю" in r.stdout, (r.returncode, r.stdout, r.stderr))
 
+# metis-1399: сам extraKnownMarketplaces (а также env, enabledPlugins) — список или строка, не словарь: заметка, а не ValueError
+for i, (key, bad) in enumerate((("extraKnownMarketplaces", ["список"]), ("extraKnownMarketplaces", "строка"),
+                                ("env", ["список"]), ("enabledPlugins", "строка"))):
+    odd = project(home, f"extwhole{i}", {"extension/manifest.json": {"manifest_version": 3},
+                                         ".claude/settings.json": {key: bad}})
+    r = run(home, "apply", "--dir", odd)
+    check(f"{key} не словарь ({json.dumps(bad, ensure_ascii=False)}): код 0, без трассы, заметка «не словарь»",
+          r.returncode == 0 and "Traceback" not in r.stderr and f"{key} не словарь" in r.stdout, (r.returncode, r.stdout, r.stderr))
+    sh = load(os.path.join(odd, ".claude", "settings.json"))
+    check(f"{key} не словарь: после apply файл разбирается и маркетплейс/env — словарь, если их писали",
+          isinstance(sh.get("extraKnownMarketplaces", {}), dict) and isinstance(sh.get("env", {}), dict), json.dumps(sh))
+
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
       all(t in MAP["tools"] for st in MAP["stacks"] for t in st["tools"]))
