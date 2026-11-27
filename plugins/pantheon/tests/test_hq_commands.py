@@ -345,6 +345,9 @@ if os.geteuid() != 0:
             else:
                 check("[1428] мутант убит: без finally после исключения каталоги остаются read-only",
                       _raised and _left != [], (_raised, _left))
+                # после проверки мутанта вернуть права, чтобы проверка [1400] не видела 0o555
+                for _d in sorted(_left, key=lambda p: p.count(os.sep), reverse=True):
+                    os.chmod(_d, 0o755)
     finally:
         run = _run_real
 
