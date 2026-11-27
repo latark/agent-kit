@@ -279,6 +279,9 @@ def test_uncovered_unread():
         story = lambda sid: (f"/x/{sid}.md", head(sid, "story", "doing", title="Пачка: " + sid), "")  # noqa: E731
         tasks = {sid: story(sid) for sid in ("metis-0100", "metis-0200")}
         now = time.time()
+        reg = os.path.join(tmp, "directions.toml")
+        with open(reg, "w", encoding="utf-8") as fh:  # планы ищутся только у направлений из реестра (без plans — папка)
+            fh.write('[[direction]]\nname = "metis-pantheon"\n')
         base = C.uncovered_packs(tmp, tasks, now, TK)
         check("uncovered_packs: один читаемый план — пачка вне раздела названа (база)", base == ["metis-0100"], base)
         # листинг plans в реестре: второй «план» — папка, чтение падает (OSError)
@@ -288,7 +291,8 @@ def test_uncovered_unread():
         os.makedirs(os.path.join(d, "broken"))
         got = C.uncovered_packs(tmp, tasks, now, TK)
         check("uncovered_packs: второй план не прочитан (реестр) — пачки направления не «вне плана»", got == [], got)
-        os.remove(os.path.join(tmp, "directions.toml"))
+        with open(reg, "w", encoding="utf-8") as fh:  # снова без поля plans: план ищется в папке направления
+            fh.write('[[direction]]\nname = "metis-pantheon"\n')
         os.rmdir(os.path.join(d, "broken"))
         bad = os.path.join(d, "plan-b.md")
         with open(bad, "w", encoding="utf-8") as fh:

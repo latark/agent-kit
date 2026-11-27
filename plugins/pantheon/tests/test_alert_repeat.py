@@ -209,7 +209,9 @@ MUTANTS = {
     "без свёртки inbox": ("pantheon.py", 'alert_fold("tail-" + k, f"{TAIL_TEXT[kind]}: {w}{tail}", "check", window=TAIL_FOLD_WINDOW)',
                           'alert(f"{TAIL_TEXT[kind]}: {w}{tail}", "check")'),
     "без свёртки autoclose-off": ("pantheon.py", 'alert_fold("autoclose-off", off, "pantheon-tick")',
-                                  'alert_once("autoclose-off", off, off, "pantheon-tick")'),
+                                  # прежний код целиком: alert_once снимался на каждой удаче (clear_once в else)
+                                  'alert_once("autoclose-off", off, off, "pantheon-tick")\n    else:\n'
+                                  '        clear_once("autoclose-off")'),
     "без свёртки инструкций": ("instructions.py", 'P.alert_fold("instr-long", ', 'P.alert_once("instr-long", ",".join(sorted(long_)), '),
     "без пола срока": ("jobs.py", 'TIMEOUT_FLOOR = {"check": 180}', "TIMEOUT_FLOOR = {}"),
     "без повтора gh": ("autoclose.py", "for attempt in (0, 1):", "for attempt in (1,):"),
