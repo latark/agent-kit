@@ -195,6 +195,46 @@ def main():
             got = isinstance(why, str) and why.startswith("Правило push")
             who = "окно" if env else "владелец"
             check(f"check_push {who}: {cmd} — {'отказ' if deny else 'можно'}", got == deny, why)
+        # metis-1040. Д1: в другой копии store → agent-kit; после cd remote по папке до cd не судится. Д3: у remote
+        # два адреса — git пушит во все, судится, если хоть один из [merge_repos]. Д2: адрес меняют -c url.*,
+        # remote.*, branch.*, --config-env и GIT_CONFIG_* — get-url их не видит, push судится
+        other = os.path.join(root, "other")
+        os.makedirs(other)
+        git(other, "init", "-q", "-b", "main")
+        git(other, "commit", "-q", "--allow-empty", "-m", "a")
+        git(other, "remote", "add", "store", "https://github.com/latark/agent-kit.git")
+        git(repo, "remote", "add", "two", "https://github.com/latark/pantheon.git")
+        git(repo, "config", "--add", "remote.two.url", "https://github.com/latark/agent-kit.git")
+        git(repo, "remote", "add", "two2", "https://github.com/latark/pantheon.git")
+        git(repo, "config", "--add", "remote.two2.url", "git@github.com:latark/pantheon.git")
+        ak = "https://github.com/latark/agent-kit.git"
+        os.environ["PANTHEON_ROLE"] = "metis-pantheon"
+        for cmd, deny, hint in (
+                (f"cd {other} && git push store feat:main", True, True),
+                (f"cd {other}; git push store feat:main", True, True),
+                (f"git -C {other} push store feat:main", True, False),
+                (f"cd {other} && git -C {repo} push store feat:main", False, False),
+                (f"cd {other} && git -C . push store feat:main", True, True),
+                (f"cd {other} && git push store feat:work", False, False),
+                ("git push two feat:main", True, False),
+                ("git push two2 feat:main", False, False),
+                (f"git -c url.{ak}.pushInsteadOf=git@github.com:latark/pantheon.git push store feat:main", True, False),
+                (f"git -c remote.store.pushurl={ak} push store feat:main", True, False),
+                (f"git -c Remote.store.pushurl={ak} push store feat:main", True, False),
+                ("git -c branch.main.pushRemote=origin push store feat:main", True, False),
+                ("git --config-env=remote.store.pushurl=AK push store feat:main", True, False),
+                ("git --config-env remote.store.pushurl=AK push store feat:main", True, False),
+                ("git -c user.name=x push store feat:main", False, False),
+                (f"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.store.pushurl GIT_CONFIG_VALUE_0={ak} "
+                 "git push store feat:main", True, False),
+                (f"GIT_CONFIG_PARAMETERS=\"'remote.store.pushurl'='{ak}'\" git push store feat:main", True, False),
+                ("git push store feat:main", False, False)):
+            why = g.check_push(win, "Bash", {"command": cmd})
+            got = isinstance(why, str) and why.startswith("Правило push")
+            check(f"check_push окно (metis-1040): {cmd} — {'отказ' if deny else 'можно'}", got == deny, why)
+            if deny:
+                check(f"подсказка git -C {'есть' if hint else 'нет'}: {cmd}", ("назови папку через git -C" in why)
+                      == hint, why)
         os.environ.pop("PANTHEON_ROLE", None)
     finally:
         shutil.rmtree(root, ignore_errors=True)

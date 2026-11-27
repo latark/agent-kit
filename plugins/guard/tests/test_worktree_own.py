@@ -145,17 +145,48 @@ try:
           bool(r) and "worktree-own" in r and "permissions.allow" in r and "sandbox.excludedCommands" in r, r)
     r = run({"name": "themis-0099"}, cwd=EC + "/src")
     check("13 то же с name из второй папки — отказ", bool(r) and "permissions.allow" in r, r)
+    check("13 в отказе — подсказка pantheon outside test --sha (metis-0915)",
+          bool(r) and "pantheon outside test --sha" in r, r)
+
+    # Agent с isolation: worktree или cwd — копия репозитория папки сессии, как name (metis-0915, Д3 argus 2 #360)
+    def agent(inp, cwd):
+        os.environ["PANTHEON_WINDOW"] = "themis-repos"
+        return g.check_worktree_own({"cwd": cwd}, "Agent", {"prompt": "x", **inp})
+    r = agent({"isolation": "worktree"}, EC)
+    check("14 Agent isolation worktree во второй папке с allow — отказ", bool(r) and "permissions.allow" in r, r)
+    r = agent({"isolation": "worktree"}, EC + "/src")
+    check("14 Agent isolation worktree из подпапки второй папки — отказ", bool(r) and "permissions.allow" in r, r)
+    r = g.check_worktree_own({"cwd": EC}, "Task", {"prompt": "x", "isolation": "worktree"})
+    check("14 Task isolation worktree — так же отказ", bool(r) and "worktree-own" in r, r)
+    r = agent({"cwd": EC}, LW)
+    check("14 Agent с cwd во вторую папку из папки запуска — отказ", bool(r) and "permissions.allow" in r, r)
+    r = agent({}, EC)
+    check("14 Agent без isolation и cwd — молчит", r is None, r)
+    r = agent({"isolation": "worktree"}, LW)
+    check("14 Agent isolation worktree в папке запуска — пропуск", r is None, r)
+    r = agent({"isolation": "worktree"}, os.path.join(root, "projects/stray"))
+    check("14 Agent вне папок направления — молчит (правило про настройки своих папок)", r is None, r)
+    os.environ.pop("PANTHEON_WINDOW", None)
+    r = g.check_worktree_own({"cwd": EC}, "Agent", {"isolation": "worktree"})
+    check("14 Agent вне окна направления — молчит", r is None, r)
     for data, key in (({"hooks": {"Stop": [{"hooks": []}]}}, "hooks"), ({"env": {"PATH": "/x"}}, "env"),
                       ({"sandbox": {"enabled": False}}, "sandbox.enabled"),
                       ({"sandbox": {"filesystem": {"allowWrite": ["/"]}}}, "sandbox.filesystem"),
                       ({"permissions": {"defaultMode": "bypassPermissions"}}, "permissions.defaultMode"),
                       ({"enabledMcpjsonServers": ["x"]}, "enabledMcpjsonServers"), ("{не json", "?"),
-                      ({"permissions": ["Bash(*)"]}, "permissions")):
+                      ({"permissions": ["Bash(*)"]}, "permissions"),
+                      # список разрешённых ключей (metis-0915): новые ключи Claude Code — отказ без правки guard
+                      ({"disableAllHooks": True}, "disableAllHooks"),
+                      ({"subagentStatusLine": {"type": "command", "command": "x"}}, "subagentStatusLine"),
+                      ({"fileSuggestion": {"type": "command", "command": "x"}}, "fileSuggestion"),
+                      ({"gcpAuthRefresh": "x"}, "gcpAuthRefresh"), ({"futureKey2027": 1}, "futureKey2027")):
         settings(EC, data)
         r = run({"path": WT}, cwd=EC)
         check(f"13 ключ {key} во второй папке — отказ", bool(r) and f": {key}" in r, r)
     settings(EC, {"permissions": {"deny": ["Bash(rm *)"], "ask": ["Bash(git push *)"]},
-                  "sandbox": {"autoAllowBashIfSandboxed": True, "enabled": True}, "model": "opus", "hooks": {}})
+                  "sandbox": {"autoAllowBashIfSandboxed": True, "enabled": True}, "model": "opus", "hooks": {},
+                  "$schema": "https://json.schemastore.org/claude-code-settings.json", "language": "russian",
+                  "disableAllHooks": False})
     r = run({"path": WT}, cwd=EC)
     check("13 только сужающие и пустые ключи — пропуск", r is None, r)
     os.remove(f)
@@ -177,6 +208,17 @@ try:
         dst.write(src.read())
     r = run({"path": LA}, cwd=LW)
     check("13 копия в папке запуска с настройками байт в байт как у папки запуска — пропуск", r is None, r)
+    # сессия в копии папки запуска, в git которой hooks (как у папки запуска): name — обычный отказ name, а не
+    # «загрузила бы настройки» (metis-0915, Д :233 argus #360); Agent с isolation оттуда — пропуск
+    with open(LA + "/.git", "w") as fh:
+        fh.write("gitdir: x\n")
+    r = run({"name": "themis-0101"}, cwd=LA)
+    check("13 name из копии папки запуска с теми же hooks — отказ name, не настройки",
+          bool(r) and "pantheon worktree add" in r and "загрузила бы" not in r, r)
+    r = g.check_worktree_own({"cwd": LA}, "Agent", {"isolation": "worktree"})
+    check("13 Agent isolation из копии папки запуска с теми же hooks — пропуск", r is None, r)
+    os.environ["PANTHEON_WINDOW"] = "themis-repos"
+    os.remove(LA + "/.git")
     fl = settings(LA, {"env": {"X": "1"}}, "settings.local.json")
     r = run({"path": LA}, cwd=LW)
     check("13 settings.local.json копии, которого нет у папки запуска — отказ", bool(r) and fl in r, r)
@@ -214,6 +256,12 @@ try:
     os.remove(f)
     r = run({"path": WT}, cwd=EC)
     check("13 настройки убраны — снова пропуск", r is None, r)
+
+    # репозиторий — путь до ПОСЛЕДНЕГО .claude/worktrees/<имя> (metis-0915, мутант x9 argus #360)
+    got = g._wt_repo("/r/.claude/worktrees/a/n/.claude/worktrees/b/src")
+    check("15 _wt_repo: последний .claude/worktrees, а не первый",
+          got == ("/r/.claude/worktrees/a/n", "/r/.claude/worktrees/a/n/.claude/worktrees/b"), got)
+    check("15 _wt_repo: путь без .claude/worktrees — (None, None)", g._wt_repo("/r/src/x") == (None, None))
 
     r = run({"path": os.path.join(root, "projects/stray/.claude/worktrees/y")}, cwd=LW)
     check("5 вне папок направлений — отказ", bool(r) and "worktree-own" in r and "themis-repos" in r, r)

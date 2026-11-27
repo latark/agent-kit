@@ -358,18 +358,22 @@ def bad_pack(run, pack, home):
     check("start: сервер MCP пакета — env_from.py, а за «--» /usr/bin/awk — без --mcp-config, но --plugin-dir с хуком "
           "пакета есть; тревога с именем сервера, только MCP", argv and len(plug) == 1
           and not after(argv, "--mcp-config") and ".claude/hooks/x.sh" in hooks_in and "awk" in new
-          and "mcp.json s:" in new and ": MCP пакета не взяты" in new and "MCP не взяты в окно" in r.stderr,
+          and "mcp.json s:" in new and ": MCP пакета не взяты" in new and "MCP пакета не взяты в окно" in r.stderr,
           (argv, r.stderr, new))
-    # metis-1222: один негодный сервер не снимает остальные — годный идёт в --mcp-config, тревога называет негодный
-    two = {"mcpServers": {**good_mcp["mcpServers"], "awk": server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py",
-                                                                    "--", "/usr/bin/awk", "x")["mcpServers"]["s"]}}
+    # metis-1222: один негодный сервер не снимает остальные — годный идёт в --mcp-config, тревога называет негодный.
+    # metis-1223: снятые и взятые серверы — в начале тревоги, до среза причин [:500]: три длинные причины его превышают
+    awk = lambda n: server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "/usr/bin/awk",  # noqa: E731
+                           n * 200)["mcpServers"]["s"]
+    two = {"mcpServers": {**good_mcp["mcpServers"], "awk": awk("x"), "awk2": awk("y"), "awk3": awk("z")}}
     put(mcp, two)
     r, argv, flags, new = start()
     cfg = after(argv, "--mcp-config")
     got = json.load(open(cfg[0], encoding="utf-8"))["mcpServers"] if cfg else {}
-    check("start: годный и негодный сервер — в --mcp-config только годный (с путём _bin снимка), --plugin-dir есть; "
-          "тревога называет awk", len(after(argv, "--plugin-dir")) == 1 and list(got) == ["s"]
-          and "${PANTHEON_PACK_BIN}" not in json.dumps(got) and "mcp.json awk:" in new and "остальные серверы MCP взяты: s" in new,
+    head = "серверы MCP awk, awk2, awk3 не взяты в окно proteus-ms, взяты: s"
+    check("start: годный и негодные серверы — в --mcp-config только годный (с путём _bin снимка), --plugin-dir есть; "
+          "тревога называет снятые и взятые до причин (metis-1223)", len(after(argv, "--plugin-dir")) == 1
+          and list(got) == ["s"] and "${PANTHEON_PACK_BIN}" not in json.dumps(got) and "mcp.json awk:" in new
+          and head in new and new.index(head) < new.index("mcp.json awk:") and head in r.stderr,
           (argv, got, r.stderr, new))
     put(mcp, server("python3", "-I", "${PANTHEON_PACK_BIN}/env_from.py", "--", "/usr/bin/awk", "BEGIN{system(\"id\")}"))
     put(hooks, hook('bash "$HOME/projects/x/start.sh"'))
@@ -577,7 +581,11 @@ def rules_of_packs(W):
             (None, None, sv(type="http", url="https://x.example/mcp", headers={"A": "b"})),
             # metis-1222: Go-сервер Grafana — бинарь ${HOME}/.local/bin по имени из PACK_LOCAL_BINS
             (None, None, sv(command="python3", args=ef + ["${HOME}/.env", "K", "--", "${HOME}/.local/bin/mcp-grafana",
-                                                          "-t", "stdio"]))]
+                                                          "-t", "stdio"])),
+            # metis-1223: свои имена из .env через запятую и --chdir без .env — годны
+            (None, None, sv(command="python3", args=ef + ["~/.env", "METRICS_URL,METRICS_TOKEN", "--", "npx", "-y",
+                                                          "a@1.2.3"])),
+            (None, None, sv(command="python3", args=ef + ["--chdir", "${HOME}/p", "--", "npx", "-y", "a@1.2.3"]))]
     for m, h, s in good:
         check(f"pack_problems: годное — без нарушений {m or h or s}", W.pack_problems(m, h, s) == [],
               W.pack_problems(m, h, s))
@@ -656,6 +664,13 @@ def rules_of_packs(W):
            ("env PATH", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], env={"PATH": "x"})),
            ("env NODE_OPTIONS", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"],
                                               env={"NODE_OPTIONS": "--require x"})),
+           # metis-1223: имена из .env до «--» — по тем же правилам, что env: DYLD_*, NODE_* и строчные — нет
+           ("имя .env DYLD_INSERT_LIBRARIES", None, None, sv(command="python3", args=ef + [
+               "~/.env", "DYLD_INSERT_LIBRARIES", "--", "${HOME}/.local/bin/mcp-grafana"])),
+           ("имя .env NODE_OPTIONS среди своих", None, None, sv(command="python3", args=ef + [
+               "~/.env", "K,NODE_OPTIONS", "--", "npx", "-y", "a@1.2.3"])),
+           ("имя .env строчными", None, None, sv(command="python3", args=ef + [
+               "~/.env", "k", "--", "npx", "-y", "a@1.2.3"])),
            ("лишнее поле cwd", None, None, sv(command="python3", args=ef + ["--", "npx", "-y", "a@1.2.3"], cwd="/")),
            ("http с headersHelper", None, None, sv(type="http", url="https://x", headersHelper="sh ~/p/h.sh")),
            ("сервер без команды и url", None, None, sv(type="stdio")),

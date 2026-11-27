@@ -662,8 +662,13 @@ def owner_said(site):
         try:
             with open(P.path("owner-log", name), "rb") as fh:
                 fh.seek(0, 2)
-                fh.seek(max(0, fh.tell() - OWNER_LOG_TAIL))
-                text = fh.read().decode("utf-8", "replace")
+                off = max(0, fh.tell() - OWNER_LOG_TAIL)
+                fh.seek(max(0, off - 1))
+                raw = fh.read()
+                if off:  # хвост начался с середины строки: обрезок «## <время>» не заголовок записи (metis-0963)
+                    cut = raw.find(b"\n")  # байт перед хвостом — \n: хвост начался с целой строки, берём её
+                    raw = b"" if cut < 0 else raw[cut + 1:]
+                text = raw.decode("utf-8", "replace")
         except OSError:
             continue
         heads = list(OWNER_ENTRY.finditer(text))

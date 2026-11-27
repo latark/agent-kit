@@ -27,6 +27,7 @@ claude-config: коммит в обход sync.sh отправил бы прав
 
 import os
 import re
+import time
 
 G = None  # модуль guard_rules.py: присваивает он сам при загрузке
 
@@ -748,3 +749,104 @@ def check_protect_config(event, tool, tool_input):
             "Дерево в сам репозиторий или выше (tar -C, unzip -d, cp -R, rsync) — тоже защита: распакуй в подпапку "
             "или назови точный файл (cp a.txt <репо>/a.txt). "
             "Нужна правка — опиши её координатору metis-pantheon файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
+
+
+# metis-0883 (Д1 ревью #347): песочница окна направления не закрывает .claude/agents в его папках, а запись туда
+# скриптом или git (python, git checkout <ветка>, stash, merge) проверка выше не видит — у неё нет текста. После
+# каждой команды Bash (PostToolUse) роли со своими папками (own_folders) судят тем же _text_risk файлы *.md в
+# <папка>/.claude/agents, <папка>/<подпапка>/.claude/agents и <папка>/.claude/worktrees/<имя>/.claude/agents, которые
+# изменились с прошлой проверки этой сессии. «Изменился» — st_ctime файла (или цели ссылки) новее метки
+# STATE/guard-agents/<session_id>: ctime ставит ядро, ни touch, ни cp -p, ни git его назад не вернут. Метки нет —
+# первая проверка сессии, окно AFTER_FIRST с. Пути защит (protected: ~/.claude/agents — собранные роли) не судятся:
+# их держит проверка до хода. Находка — решение block с причиной агенту (команда уже выполнена) и строка в
+# logs/guard-agents.log. Это защита от ошибки, а не от намеренного обхода (README guard).
+AFTER_FIRST = 600  # с: окно первой проверки сессии, когда метки ещё нет
+AFTER_LIMIT = 2000  # файлов за одну проверку; дальше не судятся
+AFTER_SID = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]{7,127}")
+
+
+def _agents_dirs(folders):
+    """Папки .claude/agents папок направления: в самой папке, в подпапке первого уровня (вложенный проект) и в
+    worktree (.claude/worktrees/<имя>). Пути защит — нет."""
+    prot, seen = protected(), set()
+    for f in folders:
+        roots = [f]
+        for sub in (f, os.path.join(f, ".claude", "worktrees")):
+            try:
+                roots += [e.path for e in os.scandir(sub) if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                pass
+        for r in roots:
+            d = os.path.realpath(os.path.join(r, ".claude", "agents"))
+            if d not in seen and os.path.isdir(d) and not G._inside(d, prot):
+                seen.add(d)
+                yield d
+
+
+def _changed_agents(folders, since):
+    """Файлы *.md в .claude/agents папок направления, у которых ctime (свой или цели ссылки) новее since."""
+    n = 0
+    for d in _agents_dirs(folders):
+        for top, _dirs, files in os.walk(d):
+            for name in files:
+                if not name.casefold().endswith(".md"):
+                    continue
+                n += 1
+                if n > AFTER_LIMIT:
+                    return
+                p = os.path.join(top, name)
+                try:
+                    ct = os.lstat(p).st_ctime
+                    if os.path.exists(p):
+                        ct = max(ct, os.stat(p).st_ctime)
+                except OSError:
+                    continue
+                if ct > since:
+                    yield p
+
+
+def agents_after(event):
+    """PostToolUse Bash: (путь, причина) первого изменённого файла роли проекта, текст которого _text_risk не
+    пропускает; иначе None. Без находки метка сессии сдвигается на начало этой проверки, с находкой — нет."""
+    role, sub, pdir = G.who(event)
+    sid = event.get("session_id")
+    if not (G.is_pantheon_role(role) or sub) or not (isinstance(sid, str) and AFTER_SID.fullmatch(sid)):
+        return None
+    if not sub and G.privileged(G.load_policy(), "metis-pantheon", role, pdir):
+        return None
+    own = own_folders(role, sub, pdir)
+    if not own:
+        return None
+    mark = os.path.join(G.STATE_DIR, "guard-agents", sid)
+    now = time.time()
+    try:
+        since = os.lstat(mark).st_mtime
+    except OSError:
+        since = now - AFTER_FIRST
+    found = None
+    for p in _changed_agents(own, since):
+        text = _read_text(p)
+        why = "текст не прочесть" if text is None else _text_risk(text, {"agents"}, p)
+        if why:
+            found = (p, why)
+            break
+    # находка метку не двигает: пока файл не исправлен, каждая следующая команда Bash снова получает отказ
+    t = since if found else now
+    os.makedirs(os.path.dirname(mark), mode=0o700, exist_ok=True)
+    os.close(os.open(mark, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+    os.utime(mark, (t, t), follow_symlinks=False)
+    if found:
+        log = os.path.join(G.STATE_DIR, "logs", "guard-agents.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{sid}\t{role or '-'}\t{found[0]}\t{found[1]}\n")
+    return found
+
+
+def agents_after_reason(found):
+    """Причина для агента по находке agents_after."""
+    p, why = found
+    return (f"Правило protect-config (после хода, metis-0883): команда изменила роль проекта "
+            f"{p.replace(G.HOME, '~')} — {why}. Такую роль правит только metis-pantheon после «да» владельца. Убери "
+            "файл или верни прежний текст через Write/Edit (их проверяют до записи) и не пиши в .claude/agents "
+            "скриптом или git; нужна правка — опиши её файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")

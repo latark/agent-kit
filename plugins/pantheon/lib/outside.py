@@ -203,10 +203,16 @@ sandbox-exec не запускается; на Linux по ps) за окно вы
 на чтение, на запись нет; STATE/outside/env и test-env; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer; каналы
 «от владельца», metis-1026: ключи демона ~/.claude/daemon, ~/.claude/.credentials*, ~/.claude/ide и terminal-notifier —
-owner_channels), записи в состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon,
+owner_channels; личное, metis-0914: пути [private] paths policy.toml — тот же список, что denyRead окон, — личные папки
+~/ai/knowledge из PERSONAL и весь STATE/owner-log — private_read), записи в состояние и ядро (STATE, ~/ai/pantheon,
+~/.claude, ~/.local/bin, ~/.local/share/pantheon,
 ~/Library/LaunchAgents, профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config
-и .git/hooks папок реестра; доска VIEW и сокет hookd HOOKD_DIR — metis-1026), Apple Events (osascript, System Events)
-и сети к портам браузеров (9222, 9333–9339) и местного прокси (6152, 6153) на любом адресе.
+и .git/hooks папок реестра; доска VIEW и сокет hookd HOOKD_DIR — metis-1026), Apple Events (osascript, System Events),
+выхода из профиля (metis-1291: запуск /bin/launchctl и /usr/bin/open, службы LaunchServices и регистрации служб и
+объектов входа launchd — ESCAPE_SERVICES) и сети к портам браузеров (9222, 9333–9339) и местного прокси (6152, 6153) на
+любом адресе. Остатки: прочая сеть наружу открыта и у тестов (uv run, uvx и pnpm тянут зависимости в том же шаге, что и
+тесты: отдельного шага установки у проверки папки и у Python нет); свой код, говорящий с launchd по XPC напрямую или
+копия launchctl под другим путём, профиль не держит — намеренный обход, граница — песочница (README guard).
 
 Запись tests для шлюза слияния — только у проверки проекта (без --script; у serve её нет никогда): тесты кончились
 кодом 0, HEAD и дерево до и после те же, команда не пустая (true, echo… — отказ; у скрипта package.json — по его
@@ -877,6 +883,35 @@ def owner_channels(h):
            [f"(subpath {_q(x)})" for x in P.NOTIFIER_PATHS]
 
 
+def private_read(h):
+    """Личное, закрытое профилю на чтение (metis-0914, Н1 модели угроз 0902): [private] paths policy.toml — тот же
+    список, что denyRead окон (private_conf; «~/» — от HOME, абсолютный — как есть, прочее не берётся), личные папки
+    ~/ai/knowledge из PERSONAL (как qmd.private_paths: и без policy.toml) и весь STATE/owner-log (слова владельца)."""
+    try:
+        with open(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+            policy = P.tomllib.load(fh)
+    except (OSError, ValueError):
+        policy = {}
+    out = set()
+    for p in P.private_conf(policy)["paths"]:
+        if p.startswith("~/"):
+            out.add(os.path.realpath(os.path.join(h, p[2:])))
+        elif os.path.isabs(p):
+            out.add(os.path.realpath(p))
+    out |= {os.path.realpath(os.path.join(P.AI_HOME, "knowledge", x)) for x in P.moved_mod().PERSONAL}
+    out.add(os.path.realpath(os.path.join(P.STATE, "owner-log")))
+    return [f"(subpath {_q(x)})" for x in sorted(out)]
+
+
+# metis-1291 (С1 metis-1060): выход из профиля — процесс вне песочницы через launchd или LaunchServices. Запуск
+# launchctl и open закрыт по пути; службы LaunchServices (open -a, -b, URL) и регистрации служб и объектов входа
+# launchd (SMAppService) — mach-lookup. Свой код по XPC к launchd напрямую профиль не держит (остаток, README guard).
+ESCAPE_EXEC = ("/bin/launchctl", "/usr/bin/open")
+ESCAPE_SERVICES = ("com.apple.coreservices.launchservicesd", "com.apple.lsd.mapdb", "com.apple.lsd.modifydb",
+                   "com.apple.lsd.open", "com.apple.lsd.openurl", "com.apple.lsd.xpc",
+                   "com.apple.xpc.smd", "com.apple.xpc.loginitemregisterd")
+
+
 def profile_text(roots=(), db_ports=()):
     """Профиль sandbox-exec: всё, кроме ключей, записи в состояние и ядро и портов браузеров и прокси. db_ports — прогон
     с ключами тестов (metis-1016): наружу только TCP на эти порты, местные адреса и DNS (сокет mDNSResponder). Хост
@@ -916,10 +951,15 @@ def profile_text(roots=(), db_ports=()):
         # шаблоны без секретов читаются (metis-0578); поздние правила сильнее; запись в них закрыта deny выше
         '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))',
         '(deny file-read* (regex #"/secrets(/|$)"))',   # secrets/ закрыта целиком, и шаблон в ней тоже
+        # metis-0914: личное и owner-log — после разрешения шаблонов: .env.example в личной папке тоже закрыт
+        "(deny file-read* file-write*\n  " + "\n  ".join(private_read(h)) + ")",
         '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
         # metis-1026 (К7): ввод в окна владельца через osascript и System Events
         '(deny appleevent-send)',
         '(deny mach-lookup (global-name "com.apple.coreservices.appleevents"))',
+        # metis-1291: выход из профиля через launchd и LaunchServices
+        "(deny process-exec\n  " + "\n  ".join(f"(literal {_q(x)})" for x in ESCAPE_EXEC) + ")",
+        "(deny mach-lookup\n  " + "\n  ".join(f"(global-name {_q(x)})" for x in ESCAPE_SERVICES) + ")",
         "(deny file-write*\n  " + "\n  ".join(write) + ")",
         *db,
         "(deny network-outbound\n  " + "\n  ".join(net) + ")",
@@ -2809,10 +2849,25 @@ def _secrets(keys):
     return out
 
 
+def _any_form(s):
+    """Регулярка значения s в любой записи (metis-1034): каждый символ раскодированного s — как есть, %XX любого
+    регистра (байты UTF-8, и вперемешку: %2f, %2F), \\uXXXX любого регистра и экранирование JSON (\\/, \\", \\\\)."""
+    out = []
+    for ch in urllib.parse.unquote(s):
+        alts = [re.escape(ch), "".join(f"%(?i:{b:02x})" for b in ch.encode("utf-8"))]
+        if ord(ch) < 0x10000:
+            alts.append(f"\\\\u(?i:{ord(ch):04x})")
+        if ch in '/"\\':
+            alts.append(re.escape("\\" + ch))
+        out.append("(?:" + "|".join(alts) + ")")
+    return "".join(out)
+
+
 def redact(text, keys):
-    """Текст без значений ключей тестов: значение → <ИМЯ>, пароль базы → ***; длинные — первыми."""
+    """Текст без значений ключей тестов: значение → <ИМЯ>, пароль базы → ***, в любой записи (_any_form); длинные —
+    первыми."""
     for s, mark in sorted(_secrets(keys).items(), key=lambda x: -len(x[0])):
-        text = text.replace(s, mark)
+        text = re.sub(_any_form(s), lambda _m, mark=mark: mark, text)
     return text
 
 

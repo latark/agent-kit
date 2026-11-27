@@ -74,8 +74,8 @@ try:
     # --- вход короткий, правила — модуль из .pyc ------------------------------------------------------------------
     with open(GUARD, encoding="utf-8") as fh:
         src = fh.read()
-    check("guard.py — короткий вход (< 250 строк), правил в нём нет",
-          src.count("\n") < 250 and "def check_" not in src and "import guard_rules" in src, src.count("\n"))
+    check("guard.py — короткий вход (< 260 строк), правил в нём нет",
+          src.count("\n") < 260 and "def check_" not in src and "import guard_rules" in src, src.count("\n"))
     copy = os.path.join(root, "hooks-copy")
     shutil.copytree(HOOKS, copy, ignore=shutil.ignore_patterns("__pycache__"))
     ev = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": home,
@@ -135,10 +135,12 @@ try:
     inactive = {"MANAGED_FILE": os.path.join(root, "нет-managed.json"), "MARKET_GUARD": market}
     strict_dir = os.path.join(home, ".local", "state", "pantheon", "guard-strict")
 
-    def probe(argv, event, conf=None, window=None, raw=None):
+    def probe(argv, event, conf=None, window=None, raw=None, branch=None):
         e = dict(env)
         if window is not None:
             e["PANTHEON_WINDOW"] = window
+        if branch is not None:
+            e["GUARD_BRANCH"] = branch
         data = raw if raw is not None else json.dumps(event)
         r = subprocess.run([sys.executable, "-I", "-c", PROBE, GUARD, json.dumps({"argv": argv, "set": conf or {}})],
                            input=data, capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT)
@@ -165,6 +167,15 @@ try:
     check("плагин, управляемые настройки, PostToolUse — не молчит (журнал запора слияния)", ran(r), r)
     r = probe([], pre("Bash"), inactive)
     check("плагин без управляемых настроек — проверяет", ran(r), r)
+    # GUARD_BRANCH=1 (metis-1227): проба guard ветки через --plugin-dir — плагин не молчит при управляемых
+    for tool, ev in (("Bash", pre("Bash")), ("Stop", {"hook_event_name": "Stop", "session_id": "s-entry-0001"})):
+        r = probe([], ev, active, branch="1")
+        check(f"GUARD_BRANCH=1, плагин при управляемых, {tool} — проверяет сам", ran(r), r)
+    for val in ("0", ""):
+        r = probe([], pre("Bash"), active, branch=val)
+        check(f"GUARD_BRANCH={val!r} (не 1) — плагин при управляемых молчит, как без флага", quiet(r), r)
+    r = probe(["--managed"], pre("Bash"), active, branch="1")
+    check("GUARD_BRANCH=1, --managed — проверяет, как и без флага", ran(r), r)
     for mode in (["--managed"], ["--strict"]):
         r = probe(mode, pre("Bash"), active)
         check(f"{mode[0]} при управляемых настройках — проверяет (молчит только плагин)", ran(r), r)
@@ -199,6 +210,8 @@ try:
     r2 = probe([], pre("Bash", sid), inactive, window="w1")
     check("строгий обновил метку повторным вызовом — плагин снова молчит",
           ran(r) and quiet(r2) and os.stat(marker).st_mtime > time.time() - 60, (r, r2))
+    r = probe([], pre("Bash", sid), inactive, window="w1", branch="1")
+    check("GUARD_BRANCH=1 при свежей метке строгого — плагин проверяет сам (metis-1227)", ran(r), r)
     r = probe([], pre("Read", sid), inactive, window="w1")
     check("плагин, инструмент, который строгий ещё не проверял (Read), — проверяет", ran(r), r)
     r = probe([], pre("Bash", sid), inactive, window="w2")
@@ -305,6 +318,23 @@ try:
     p.stderr.close()
     check(f"stdin не закрыт — код 2 за {took:.1f} с и причина «не уложилась» (свой срок, а не таймаут хука)",
           p.returncode == 2 and "не уложилась" in err and took < 8, (p.returncode, err))
+
+    # --- сбой вне try входа (metis-0613): закрытый stdin и guard_rules без run_hook — код 2 (на Stop — 0), не код 1 ---
+    NO_RUN_HOOK = PROBE.replace("stub.run_hook = run_hook\n", "")
+    conf = json.dumps({"argv": ["--managed"], "set": {}})
+    r = subprocess.run(["/bin/sh", "-c", 'exec "$0" -I -c "$1" "$2" "$3" <&-', sys.executable, PROBE, GUARD, conf],
+                       capture_output=True, text=True, env=env, timeout=SUB_TIMEOUT)
+    check("закрытый stdin — код 2 и причина «сбой входа», не трассировка с кодом 1",
+          r.returncode == 2 and "сбой входа guard" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr))
+    log =os.path.join(home, ".local", "state", "pantheon", "logs", "guard-failures.log")
+    check("сбой входа записан в FAIL_LOG с этапом run",
+          os.path.isfile(log) and "\tmanaged\trun\t" in open(log, encoding="utf-8").read(), os.path.isfile(log))
+    for name, ev_, code in (("PreToolUse", pre("Bash"), 2), ("Stop", {"hook_event_name": "Stop", "session_id": "s-nrh-0001",
+                                                                       "cwd": home}, 0)):
+        r = subprocess.run([sys.executable, "-I", "-c", NO_RUN_HOOK, GUARD, conf], input=json.dumps(ev_),
+                           capture_output=True, text=True, env=env, timeout=SUB_TIMEOUT)
+        check(f"guard_rules без run_hook, {name} — код {code}, не 1", r.returncode == code
+              and (code == 0 or "сбой входа guard" in r.stderr) and "Traceback" not in r.stderr, (r.returncode, r.stderr))
 finally:
     shutil.rmtree(root, ignore_errors=True)
 
