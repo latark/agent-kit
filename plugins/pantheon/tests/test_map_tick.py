@@ -373,7 +373,7 @@ M.allowed_repos = lambda: {"latark/other"}
 check("agent-kit нет в merge_repos → ничего", MT.tick(T) is None and not w.heavy_calls)
 
 # metis-1389: репозиторий сверяется по owner/repo, а не по голому имени
-w = World()
+w = World("own-repo")
 M.allowed_repos = lambda: {"evil/agent-kit", "latark/other"}
 check("agent-kit другого владельца не засчитан (map)", MT.repos() == [], MT.repos())
 M.allowed_repos = lambda: {REPO, "evil/agent-kit"}

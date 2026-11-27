@@ -106,7 +106,8 @@ def catalog_repo():
     entry = _known_entry()
     src = entry.get("source") if entry else None
     repo = str(src.get("repo") or "").strip().lower() if isinstance(src, dict) else ""
-    return repo if re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", repo) else None
+    # владелец — буква/цифра в начале; имя репозитория может начинаться с точки (.github), но не "." и не ".."
+    return repo if re.fullmatch(r"[a-z0-9][a-z0-9-]*/(?!\.{1,2}$)[a-z0-9_.-]+", repo) else None
 
 
 def plugins_released(repo):
