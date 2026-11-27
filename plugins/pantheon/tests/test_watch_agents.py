@@ -316,6 +316,29 @@ def test_zeus_clean_skipped_not_code4_1192():
               f"1192: очистка Зевса при пропуске: {alerts} {st}")
 
 
+def test_zeus_clean_tab_copy_1380():
+    """metis-1380: копия Зевса во вкладке терминала (в реестре, без id) — очистка не вызывает свежий старт (он падал кодом
+    1 каждый час с двумя тревогами), пишет след «пропуск» и одну тревогу в сутки. Ловит откат ветки `tabs` в zeus_clean:
+    без неё fresh_start вызван, тревог «не вышла» несколько."""
+    p, w = _core()
+    w.zeus_clean_check = lambda a, tp: ([], 160_000, {"turn": 1})
+    w.zeus_hold = lambda: None
+    p.transcript_path = lambda a: "/nonexistent/zeus.jsonl"
+    p.agents_all = lambda: [ZLIVE]
+    p.live_copies = lambda name, agents, registry=None: [ZLIVE, {"name": "zeus", "pid": 85600, "kind": "interactive"}]
+    alerts, called = [], []
+    p.alert = lambda text, src=None: alerts.append(text)
+    p.fresh_start = lambda *a, **k: called.append(1) or 1
+    with contextlib.suppress(OSError):
+        os.remove(p.path("zeus-clean.json"))
+    for i in range(3):  # три прохода подряд (раньше — по одному в час): тревога одна, свежего старта нет
+        w.zeus_clean([ZLIVE], T0 + i * 3700)
+    st = p.read_json(p.path("zeus-clean.json"), {}) or {}
+    check(not called and len(alerts) == 1 and "вкладке терминала" in alerts[0] and "85600" in alerts[0]
+          and not [x for x in alerts if "не вышла" in x] and (st.get("last") or {}).get("result") == "пропуск",
+          f"1380: копия во вкладке: вызовов {called}, тревоги {alerts}, след {st.get('last')}")
+
+
 def test_zeus_clean_agents_silent_after_stop_1192():
     """metis-1192 (находка раунда 4): очистка Зевса, claude agents молчит (не JSON) после claude stop до конца срока
     ожидания имени — без трассы и без запуска; тревога «Зевс остановлен — pantheon start zeus» с причиной «claude
