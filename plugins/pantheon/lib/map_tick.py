@@ -48,7 +48,7 @@ MAP_REL = "plugins/pantheon/scripts/affected-map.json"
 BROKEN_OK = frozenset({"pantheon/test_run_tests.py"})  # его красит сама прошлая карта (см. test_run_tests.py) — в итоге не называется
 TAIL_LINES = 40  # строк хвоста на упавший при сборке файл в broken_tails
 PLUGIN_DIRS = ("plugins/guard", "plugins/pantheon", "plugins/project-tools")
-REPO_NAMES = ("agent-kit",)
+REPO_FULL = ("latark/agent-kit",)   # owner/repo целиком: то же имя у другого владельца не в счёт (metis-1389)
 LOG_DEPTH = 200
 CHECK_TIMEOUT = 300
 UPDATE_TIMEOUT = 3 * 3600
@@ -69,7 +69,7 @@ def state_file():
 
 
 def repos():
-    return sorted(r for r in P.merge_mod().allowed_repos() if r.rsplit("/", 1)[-1] in REPO_NAMES)
+    return sorted(r for r in P.merge_mod().allowed_repos() if r in REPO_FULL)
 
 
 def load_state():

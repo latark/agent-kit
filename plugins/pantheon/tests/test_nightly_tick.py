@@ -376,6 +376,13 @@ w.alerts.clear()
 NT.tick(C0 + NT.STALE + 10 + CE)
 check("и на следующем проходе (тот же запуск без итога) — тревога STALE_KEY остаётся (Д1)",
       w.alerts and w.alerts[-1][0] == NT.STALE_KEY, w.alerts)
+# metis-1389: репозиторий сверяется по owner/repo, а не по голому имени
+w = World()
+M.allowed_repos = lambda: {"evil/agent-kit", "latark/other"}
+check("agent-kit другого владельца не засчитан (nightly)", NT.repos() == [], NT.repos())
+M.allowed_repos = lambda: {REPO, "evil/agent-kit"}
+check("свой agent-kit засчитан, чужой с тем же именем — нет (nightly)", NT.repos() == [REPO], NT.repos())
+
 check("локально ничего не запущено за весь тест", not LOCAL, LOCAL)
 
 subprocess.Popen, subprocess.run = _real_popen, _real_run
