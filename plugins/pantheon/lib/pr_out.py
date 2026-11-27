@@ -12,8 +12,9 @@ gh, проверяет она сама (Д2 плана):
 4. флаги — только из таблицы формы подкоманды (FORM); значение -R и -F/--body-file не начинается с «-»; -e/--editor
    и -w/--web нет совсем: редактор и браузер мимо песочницы исполнили бы чужой код;
 5. позиционный — только номер PR или имя ветки (без URL и owner/repo#N); у create позиционных нет;
-6. -F/--body-file: без шаблонов, не «-»; realpath — только во временных папках и своей копии репозитория, не из личного
-   ([private] paths) и не из .git — оба без учёта регистра и формы Юникода (_key, APFS). Файл читает команда и отдаёт gh текстом (--body), gh путь не получает;
+6. -F/--body-file: без шаблонов, не «-»; realpath — только в своём $TMPDIR и своей копии репозитория (общие /tmp,
+   /private/tmp чужих сессий закрыты, metis-1348), не из личного ([private] paths), не из .git — оба без учёта
+   регистра и формы Юникода (_key, APFS) — и не из sandbox.filesystem.denyRead сборки окна (_read_closed). Файл читает команда и отдаёт gh текстом (--body), gh путь не получает;
 7. репозиторий — из проверенного url origin своей папки (git_window в gitout.py: своя копия, origin только github.com
    и из [merge_repos] своего направления); -R можно не писать, а если он есть — только этот же репозиторий;
 8. окну с личным (координатор из [private] coordinators или личная папка среди папок окна) — отказ (SEC-13);
@@ -21,13 +22,15 @@ gh, проверяет она сама (Д2 плана):
    цепочек, подстановок, присваивания и обёрток.
 
 Ещё: ветка PR — не базовая (create: --head или текущая ветка не main/master и не --base; edit, comment, ready по
-ветке, close, reopen, update-branch по ветке — не main/master; --delete-branch у close нет). gh получает разобранные флаги в форме `--флаг=значение` (разбор gh и команды не расходится),
+ветке, close, reopen, update-branch по ветке — не main/master; update-branch по номеру — headRefName PR
+(gh pr view) не main/master, metis-1348; --delete-branch у close нет). gh получает разобранные флаги в форме `--флаг=значение` (разбор gh и команды не расходится),
 окружение без GH_*, GIT_* окна, XDG_CONFIG_HOME, EDITOR, VISUAL, BROWSER и PAGER, постоянный PATH (GH_PATH).
 `pantheon batch pr` ходит сюда же: pr_write — запись, gh_read — `gh pr list`.
 Код выхода: 2 — отказ (причина последней строкой stderr), иначе код gh.
 
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
 """
+import fnmatch
 import os
 import re
 import subprocess
@@ -164,6 +167,35 @@ def _personal():
     return any(_inside(x, folders, _key) for x in _private())
 
 
+def _read_closed(full):
+    """Закрыт ли путь окну на чтение: sandbox.filesystem.denyRead его сборки (STATE/settings/<окно>.json, metis-1348).
+    Запись — путь («~/…» раскрывается, хвост «/**» и «/*» снимается: закрыто поддерево), шаблон или имя без «/»
+    (.env, secrets — компонент любого пути). Шире, не уже: «*» у fnmatch переходит через «/»; регистр и Юникод — _key.
+    Окна или файла нет — закрытого нет."""
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    data = P.read_json(P.path("settings", win + ".json"), {}) if win else {}
+    fs = (data.get("sandbox") or {}).get("filesystem") if isinstance(data, dict) else None
+    items = fs.get("denyRead") if isinstance(fs, dict) else None
+    parts = [c for c in full.split(os.sep) if c]
+    ancestors = [os.sep + os.sep.join(parts[:i]) for i in range(1, len(parts) + 1)]
+    for x in items if isinstance(items, list) else []:
+        pat = x.strip() if isinstance(x, str) else ""
+        while pat.endswith(("/**", "/*")):
+            pat = pat.rsplit("/", 1)[0]
+        pat = P.HOME + pat[1:] if pat == "~" or pat.startswith("~/") else pat
+        if not pat:
+            continue
+        if not pat.startswith("/"):  # имя без папки: любой компонент пути
+            if any(fnmatch.fnmatchcase(_key(c), _key(pat)) for c in parts):
+                return True
+            continue
+        pat = "/" + pat.lstrip("/")
+        cands = {pat} if re.search(r"[*?\[]", pat) else {pat, os.path.realpath(pat)}
+        if any(fnmatch.fnmatchcase(_key(a), _key(c)) for c in cands for a in ancestors):
+            return True
+    return False
+
+
 def _body(f, cwd, top):
     """Текст файла --body-file (пункт 6) — его читает команда, gh путь не получает."""
     if f == "-" or re.search(r"[*?\[{]", f):
@@ -171,9 +203,11 @@ def _body(f, cwd, top):
     full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f)))
     if _inside(full, _private(), _key) or any(_key(c) == ".git" for c in full.split(os.sep)):
         raise PrRefuse(f"--body-file {f}: личное ([private] policy.toml) и файлы из .git на GitHub не выносятся")
-    tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp") if p]
+    if _read_closed(full):
+        raise PrRefuse(f"--body-file {f}: путь закрыт окну на чтение (denyRead сборки окна)")
+    tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""),) if p]
     if not _inside(full, tmp + [top]):
-        raise PrRefuse(f"--body-file {f}: читать можно только из временных папок и своей копии репозитория (realpath)")
+        raise PrRefuse(f"--body-file {f}: читать можно только из своего $TMPDIR и своей копии репозитория (realpath)")
     try:
         with open(full, "rb") as fh:
             data = fh.read(BODY_MAX + 1)
@@ -208,6 +242,14 @@ def pr_write(sub, args, cwd, capture=False):
         raise PrRefuse(f"--head «{head}» — только имя своей ветки (без owner:)")
     if not (sub != "create" and head.isdigit()) and (head in ("", "HEAD") or head.lower() in PROTECTED or head == base):
         raise PrRefuse(f"ветка PR «{head or '?'}» — базовая или не ветка: PR только из своей ветки")
+    if sub == "update-branch" and pos and pos[0].isdigit():  # по номеру ветку PR не видно: спрашиваем у GitHub
+        view = subprocess.run(["gh", "pr", "view", pos[0], "--repo=" + slug, "--json", "headRefName", "--jq",
+                               ".headRefName"], cwd=top, env=_env(), capture_output=True, text=True)
+        pr_head = view.stdout.strip()
+        if view.returncode != 0 or not pr_head:
+            raise PrRefuse(f"update-branch {pos[0]}: ветку PR не узнать (gh pr view → код {view.returncode})")
+        if pr_head.lower() in PROTECTED:
+            raise PrRefuse(f"update-branch {pos[0]}: ветка PR «{pr_head}» — базовая: PR только из своей ветки")
     out = ["gh", "pr", sub, *pos]
     for f, v in flags:
         if f == "--repo":

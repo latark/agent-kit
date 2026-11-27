@@ -80,8 +80,13 @@ try:
 
     # поддельный gh: аргументы через NUL в gh.log, окружение — в gh.env; код выхода из файла gh.code (если есть)
     ghlog, ghenv, ghcode = (os.path.join(W, x) for x in ("gh.log", "gh.env", "gh.code"))
+    ghview, ghhead = os.path.join(W, "gh.view"), os.path.join(W, "gh.head")
+    open(ghhead, "w").write("1334-x\n")
     open(os.path.join(bindir, "gh"), "w").write(
         "#!/bin/sh\n"
+        # metis-1348: `gh pr view` (ветка PR для update-branch) — ответ из gh.head, код из gh.viewcode; журнал не трогает
+        f"if [ \"$1 $2\" = 'pr view' ]; then echo \"$@\" > '{ghview}'; cat '{ghhead}'; "
+        f"[ -f '{ghview}.code' ] && exit \"$(cat '{ghview}.code')\"; exit 0; fi\n"
         f"env > '{ghenv}'\n"
         f"for a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{ghlog}'\n"
         "echo https://github.com/x/y/pull/9\n"
@@ -232,11 +237,41 @@ try:
                            ("личное другим регистром", os.path.join("SECRET", "s.md"), "личное")):
         case(f"--body-file {name} (регистр)", ["comment", "5", "-F", rel], mut=fold_mut, why=why)
         case(f"--body-file {name} (регистр, откат)", ["comment", "5", "-F", rel], mut=undo_mut, why=why)
-    case("--body-file вне временных папок и своей копии", ["comment", "5", "-F", outside], why="только из временных",
+    case("--body-file вне своего $TMPDIR и своей копии", ["comment", "5", "-F", outside], why="только из своего",
          mut=("    if not _inside(full, tmp + [top]):\n", "    if False:\n"))
     os.symlink(outside, os.path.join(tmpd, "link.md"))
     case("--body-file — ссылка наружу (realpath)", ["comment", "5", "-F", os.path.join(tmpd, "link.md")],
-         why="только из временных")
+         why="только из своего")
+    # metis-1348: общий /tmp и /private/tmp — чужие сессии; файл там вне своего TMPDIR (и вне копии) не читается
+    shared = os.path.join("/tmp", f"pr-out-shared-{os.getpid()}.md")
+    try:
+        open(shared, "w").write("чужое в /tmp\n")
+    except OSError:
+        shared = None
+    if shared and not os.path.realpath(shared).startswith(W + os.sep):
+        tmp_line = '    tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""),) if p]\n'
+        tmp_mut = (tmp_line, '    tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp") if p]\n')
+        case("--body-file из общего /tmp (не свой TMPDIR)", ["comment", "5", "-F", shared], mut=tmp_mut,
+             why="только из своего")
+        os.remove(shared)
+    # metis-1348: denyRead сборки окна (settings/<окно>.json): путь внутри своего TMPDIR, но закрытый окну, не читается
+    os.makedirs(os.path.join(tmpd, "deny-me"))
+    os.makedirs(os.path.join(state, "settings"))
+    closed_f = os.path.join(tmpd, "deny-me", "c.md")
+    open(closed_f, "w").write("закрыто\n")
+    open(os.path.join(tmpd, "ok.md"), "w").write("можно\n")
+    deny_forms = {"win-abs": [f"{tmpd}/deny-me/**"], "win-dir": [f"{tmpd}/deny-me"], "win-glob": [f"{tmpd}/deny-*/*"],
+                  "win-name": ["deny-me"]}
+    deny_mut = ("    if _read_closed(full):\n", "    if False:\n")
+    import json
+    for win, items in deny_forms.items():
+        json.dump({"sandbox": {"filesystem": {"denyRead": items}}}, open(os.path.join(state, "settings", win + ".json"), "w"))
+        case(f"--body-file закрыт denyRead окна ({win}: {items[0][-24:]})", ["comment", "5", "-F", closed_f],
+             env={"PANTHEON_WINDOW": win}, mut=deny_mut, why="закрыт окну на чтение")
+        r = cli("comment", "5", "-F", os.path.join(tmpd, "ok.md"), env={"PANTHEON_WINDOW": win})
+        check(f"--body-file вне denyRead окна ({win}) — код 0", r.returncode == 0, r.stderr)
+    r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_WINDOW": "win-none"})
+    check("окно без файла настроек: закрытого нет — код 0", r.returncode == 0, r.stderr)
     case("--body-file нет файла", ["comment", "5", "-F", "nope.md"], why="не читается")
     r = cli("comment", "5", "-F", tbody)
     check("--body-file: gh получает текст, а не путь", r.returncode == 0 and tbody not in "\0".join(gh_args() or [])
@@ -305,6 +340,28 @@ try:
     check("update-branch с --rebase и своим -R — код 0",
           r.returncode == 0 and gh_args() == ["pr", "update-branch", "5", "--rebase", "--repo=x/y"],
           f"{gh_args()} {r.stderr}")
+    check("update-branch по номеру: gh pr view спрошен по тому же репозиторию",
+          os.path.exists(ghview) and open(ghview).read().split() == ["pr", "view", "5", "--repo=x/y", "--json",
+                                                                       "headRefName", "--jq", ".headRefName"],
+          open(ghview).read() if os.path.exists(ghview) else "нет вызова view")
+    # metis-1348: update-branch по номеру — ветка PR main/master отказ; сбой view — отказ; мутант — доходит до gh
+    view_mut = ("        if pr_head.lower() in PROTECTED:\n", "        if False:\n")
+    for hd in ("main", "Master"):
+        open(ghhead, "w").write(hd + "\n")
+        case(f"update-branch 5, у PR ветка {hd}", ["update-branch", "5"], mut=view_mut, why="базовая")
+    open(ghhead, "w").write("\n")
+    case("update-branch 5, gh pr view без ветки", ["update-branch", "5"], why="ветку PR не узнать",
+         mut=('        if view.returncode != 0 or not pr_head:\n', "        if False:\n"))
+    open(ghhead, "w").write("1334-x\n")
+    open(ghview + ".code", "w").write("1")
+    case("update-branch 5, gh pr view упал (код 1) при ветке в выводе — отказ", ["update-branch", "5"],
+         why="ветку PR не узнать", mut=('        if view.returncode != 0 or not pr_head:\n', "        if not pr_head:\n"))
+    os.remove(ghview + ".code")
+    open(ghhead, "w").write("1334-x\n")
+    os.remove(ghview)
+    r = cli("update-branch", "1334-x")
+    check("update-branch по имени ветки — код 0, gh pr view не зовётся", r.returncode == 0 and not os.path.exists(ghview),
+          r.stderr)
     r = cli("update-branch")
     check("update-branch по текущей ветке (не базовой) — код 0",
           r.returncode == 0 and gh_args() == ["pr", "update-branch", "--repo=x/y"], f"{gh_args()} {r.stderr}")
