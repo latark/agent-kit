@@ -21,7 +21,6 @@ import atexit
 import fnmatch
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,7 +28,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from _py311 import PY311  # noqa: E402  pantheon.py — только на Python 3.11+
+from _py311 import PY311, readonly_dirs, rmtree_force, unlock_tree  # noqa: E402  pantheon.py — только на Python 3.11+
 
 if sys.version_info < (3, 11):
     os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)] + sys.argv[1:])
@@ -39,13 +38,7 @@ tempfile.tempdir = _ROOT
 
 
 def _cleanup():
-    for d, dirs, _files in os.walk(_ROOT):  # папки только для чтения rmtree не удалит
-        for n in dirs:
-            try:
-                os.chmod(os.path.join(d, n), 0o700)
-            except OSError:
-                pass
-    shutil.rmtree(_ROOT, True)
+    rmtree_force(_ROOT)  # папки только для чтения rmtree не удалит
 
 
 atexit.register(_cleanup)
@@ -187,6 +180,14 @@ def excluded(argv):
 
 
 def suite(kind, prefix_of):
+    """metis-1400: что бы ни случилось в прогоне, права каталогов под base возвращаются (а не только в atexit)."""
+    try:
+        return _suite(kind, prefix_of)
+    finally:
+        unlock_tree(os.path.join(_ROOT, kind))
+
+
+def _suite(kind, prefix_of):
     """Все CMDS в одном виде песочницы. prefix_of(env, home, state) → префикс команды (seatbelt) или ()."""
     base = os.path.join(_ROOT, kind)
     env, home, state = build(base)
@@ -370,6 +371,9 @@ if out_md:
             s = sb_by.get(tuple(argv), ("—", ""))[0]
             cell = ln.replace("|", "\\|")[:220]
             fh.write(f"| `pantheon {' '.join(argv)}` | {'да' if excluded(argv) else 'нет'} | {rc} | {cell} | {s} |\n")
+
+check("[1400] после прогона в корне временных папок нет каталогов только для чтения (0o555)", not readonly_dirs(_ROOT),
+      readonly_dirs(_ROOT))
 
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]}" + (f"  FAIL: {len(FAILS)}" if FAILS else ""))
 sys.exit(1 if FAILS else 0)

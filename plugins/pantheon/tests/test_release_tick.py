@@ -315,5 +315,17 @@ out = RT.tick(T)
 check("[T9] Н4: «evil/agent-kit» в merge_repos — не latark/agent-kit → ни клона, ни release.py",
       out is None and w.releases() == [] and not os.path.exists(os.path.join(w.state, "release")), out)
 
+# --- [metis-1403] сетевой признак — по каждой ошибке, а не по склейке ------------------------------------------------
+w = World("net-per-error-1403")
+_repos, _check, _net = RT.repos, RT.check, RT.P.net_error
+RT.P.net_error = lambda text: "TLS" in str(text)
+RT.repos = lambda: ["a/x", "b/y"]
+RT.check = lambda repo, t, st: (repo, "fetch: TLS handshake timeout" if repo == "a/x" else "release.py код 1", False)
+RT.tick(T)
+RT.repos, RT.check, RT.P.net_error = _repos, _check, _net
+shown = w.alerts[-1][1] if w.alerts else ""
+check("[1403] сеть рядом с настоящей ошибкой: в alert_net уходит только настоящая — не сетевая, тревога сразу",
+      "код 1" in shown and "TLS" not in shown, (w.alerts, w.cleared))
+
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)

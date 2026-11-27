@@ -393,6 +393,21 @@ check("[1389] каталог не agent-kit → пусто", NT.repos() == [], N
 OWN[0] = REPO
 
 
+# metis-1398: каталога agent-kit нет → строка в tick.log и одна тревога по ключу, а не молчание
+w = World()
+OWN[0] = None
+out = NT.tick(T)
+check("[1398] нет каталога → строка «нет каталога» в tick.log", out == "нет каталога" and "nightly-tick: нет каталога" in w.tick_log(),
+      (out, w.tick_log()))
+check("[1398] нет каталога → тревога по NOCAT_KEY", [a[0] for a in w.alerts] == [NT.NOCAT_KEY] and not w.calls, (w.alerts, w.calls))
+NT.tick(T + CE + 1)
+check("[1398] повтор — то же значение тревоги (alert_once свернёт)", len(w.alerts) == 2 and w.alerts[0] == w.alerts[1], w.alerts)
+OWN[0] = REPO
+w.alerts.clear()
+NT.tick(T + 2 * CE + 2)
+check("[1398] каталог появился → тревога снята", NT.NOCAT_KEY in w.cleared and not w.alerts, (w.cleared, w.alerts))
+
+
 check("локально ничего не запущено за весь тест", not LOCAL, LOCAL)
 
 subprocess.Popen, subprocess.run = _real_popen, _real_run

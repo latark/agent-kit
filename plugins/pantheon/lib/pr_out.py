@@ -200,13 +200,20 @@ def _read_rule(spec, top):
 
 def _read_closed(full, top=None):
     """Закрыт ли путь окну на чтение (metis-1348): sandbox.filesystem.denyRead сборки окна (STATE/settings/<окно>.json) и
-    правила Read(...) из permissions.deny — и этого файла, и managed-settings (MANAGED_FILE). Запись — путь («~/…»
+    правила Read(...) из permissions.deny — и этого файла, и файла запуска сессии (settings/run/<PANTHEON_SESSION>.json,
+    metis-1418), и managed-settings (MANAGED_FILE). Запись — путь («~/…»
     раскрывается, хвост «/**» и «/*» снимается: закрыто поддерево), шаблон или имя без «/» (.env, secrets — компонент
     любого пути; относительные с «/» — от корня копии top, _read_rule). Шире, не уже: «*» у fnmatch переходит через «/»;
     регистр и Юникод — _key. Файла нет или не разобрать — закрытого нет."""
     win = os.environ.get("PANTHEON_WINDOW") or ""
+    ses = os.environ.get("PANTHEON_SESSION") or ""
+    # настройки, которые окно получает при запуске: settings/<окно>.json и файл запуска settings/run/<сессия>.json
+    # (копия с env сессии; сборка обновляет его позже, чем окно перечитывает) — deny из любого из них закрывает путь (metis-1418)
     items = []
-    for data in (P.read_json(P.path("settings", win + ".json"), {}) if win else {}, _json(MANAGED_FILE)):
+    files = [P.path("settings", win + ".json")] if win else []
+    if ses and ses not in (".", "..") and os.sep not in ses:
+        files.append(P.path("settings", "run", ses + ".json"))
+    for data in [P.read_json(f, {}) for f in files] + [_json(MANAGED_FILE)]:
         if not isinstance(data, dict):
             continue
         fs = (data.get("sandbox") or {}).get("filesystem")

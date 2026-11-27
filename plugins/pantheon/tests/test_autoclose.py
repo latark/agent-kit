@@ -1189,12 +1189,60 @@ def test_backfill_actual():
     check("backfill_actual: пустой actual дописан из учёта или «нет замера», остальные не тронуты (metis-1401)",
           [(c[0], c[1]["actual"]) for c in calls] == [("d-1", "$1.00"), ("d-5", "нет замера")] and not errs
           and all(c[2].get("keep_updated") for c in calls), str(calls))
+    # metis-1419: статус не done — не трогаем (мутант без проверки status допишет actual открытой задаче)
+    rows2 = {"o-1": ("q1", {"status": "doing", "closed": "2026-11-08"}, "- закрыта по слиянию PR #1\n"),
+             "o-2": ("q2", {"status": "review", "closed": "2026-11-08"}, "- закрыта по слиянию PR #2\n")}
+    calls2 = []
+    Tn = types.SimpleNamespace(load_tasks=lambda p, w: rows2, WORK_TYPES=(), CLOSED_BY_MERGE=T.CLOSED_BY_MERGE,
+                               RELEASE_FIELDS_FROM=T.RELEASE_FIELDS_FROM,
+                               task_set=lambda p, t, tid, ch, **kw: calls2.append(tid))
+    A.backfill_actual("pan", T0, Tn, lambda tid: "$1.00", [], {})
+    check("backfill_actual: задача не в done (doing, review) не получает actual (metis-1419)", calls2 == [], str(calls2))
+    # ветка ValueError: ошибка записи уходит в errors по «actual <id>», проход идёт дальше; сбой учёта — «нет замера»
+    seen, boom = [], {"d-5"}
+
+    def task_set(p, t, tid, ch, **kw):
+        if tid in boom:
+            raise ValueError("шапка не прошла проверку (проба)")
+        seen.append((tid, ch["actual"]))
+
+    def actual_for(tid):
+        if tid == "d-1":
+            raise RuntimeError("учёт недоступен")
+        return "$2.00"
+    Tv = types.SimpleNamespace(load_tasks=lambda p, w: rows, WORK_TYPES=(), CLOSED_BY_MERGE=T.CLOSED_BY_MERGE,
+                               RELEASE_FIELDS_FROM=T.RELEASE_FIELDS_FROM, task_set=task_set)
+    log3, errs3 = [], {}
+    A.backfill_actual("pan", T0, Tv, actual_for, log3, errs3)
+    check("backfill_actual: ValueError записи — в errors «actual d-5», без строки в журнале; сбой учёта — «нет замера»; "
+          "соседняя задача дописана (metis-1419)",
+          list(errs3) == ["actual d-5"] and "шапка не прошла" in errs3["actual d-5"] and seen == [("d-1", A.NO_METRIC)]
+          and not any("d-5" in ln for ln in log3), (errs3, seen, log3))
+
+
+def test_run_calls_backfill():
+    """metis-1419: run() зовёт backfill_actual после close_checked, ошибки его уходят в итог прохода. Мутант: вызов удалён."""
+    tmp, home, state, gh, env = make()
+    orig = A.backfill_actual
+    got = []
+    try:
+        def fake(pantheon, t, Tm, actual_for, log, errors):
+            got.append(pantheon)
+            errors["actual x-1"] = "проба"
+        A.backfill_actual = fake
+        log, errs = run_cache(home, state, T0, {"latark/agent-kit": []})
+        check("run: backfill_actual вызван один раз за проход, его ошибка в итоге run (metis-1419)",
+              got == [home] and errs.get("actual x-1") == "проба", (got, errs))
+    finally:
+        A.backfill_actual = orig
+        shutil.rmtree(tmp, True)
 
 
 def main():
     test_lists_and_checked()
     test_unit()
     test_backfill_actual()
+    test_run_calls_backfill()
     test_board_problems_unit()
     test_board_problems_old_closed()
     test_attention_on_card()

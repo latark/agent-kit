@@ -298,7 +298,7 @@ def detect(cmap, root):
 def plugin_value(name, *layers):
     """Значение enabledPlugins по старшинству: первый слой, где плагин назван (local → проект → пользователь)."""
     for layer in layers:
-        v = (layer.get("enabledPlugins") or {}).get(name)
+        v = _as_dict(layer.get("enabledPlugins")).get(name)
         if v is not None:
             return bool(v)
     return None
@@ -504,10 +504,15 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
 
     new_servers = dict(servers)
     approve, codex = set(), {}
-    new_shared_plugins = dict(shared.get("enabledPlugins") or {})
-    new_local_plugins = dict(local.get("enabledPlugins") or {})
-    new_shared_markets = dict(shared.get("extraKnownMarketplaces") or {})
-    new_shared_env = dict(shared.get("env") or {})
+    # metis-1399: не словарь (список, строка) — заметка и пустой словарь, а не ValueError из dict(); запись заменит значение
+    for src, label, key in ((shared, ".claude/settings.json", "enabledPlugins"), (local, ".claude/settings.local.json", "enabledPlugins"),
+                            (shared, ".claude/settings.json", "extraKnownMarketplaces"), (shared, ".claude/settings.json", "env")):
+        if src.get(key) and not isinstance(src.get(key), dict):
+            p.notes.append(f"{label}: {key} не словарь ({src[key]!r:.60}) — считаю пустым, при записи заменю словарём")
+    new_shared_plugins = dict(_as_dict(shared.get("enabledPlugins")))
+    new_local_plugins = dict(_as_dict(local.get("enabledPlugins")))
+    new_shared_markets = dict(_as_dict(shared.get("extraKnownMarketplaces")))
+    new_shared_env = dict(_as_dict(shared.get("env")))
     have_plugins = None
 
     for name in p.wanted:
@@ -555,8 +560,8 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         elif "plugin" in tool:
             plugin = tool["plugin"]
             state = plugin_value(plugin, local, shared, user)
-            if not state and ((local.get("enabledPlugins") or {}).get(plugin) is False or
-                              (shared.get("enabledPlugins") or {}).get(plugin) is False):
+            if not state and (_as_dict(local.get("enabledPlugins")).get(plugin) is False or
+                              _as_dict(shared.get("enabledPlugins")).get(plugin) is False):
                 p.notes.append(f"{name}: плагин {plugin} выключен в настройках проекта — не включаю")
                 continue
             # сторонний маркетплейс и env плагина — в общие настройки проекта, а не во все сессии
@@ -621,7 +626,7 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     if p.unrecorded:
         p.notes.append(f"отпечатки одобренных серверов не записаны на этом Mac: {names(p.unrecorded)} — apply запомнит "
                        "их, и подсказка заметит подмену после git pull")
-    if new_local_plugins != (local.get("enabledPlugins") or {}):
+    if new_local_plugins != _as_dict(local.get("enabledPlugins")):
         new_local["enabledPlugins"] = new_local_plugins
     if new_local != local:
         p.write(p.path(".claude", "settings.local.json"),
@@ -631,11 +636,11 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
                        "уберите (project-tools общие настройки сам не чистит)")
 
     new_shared = dict(shared)
-    if new_shared_plugins != (shared.get("enabledPlugins") or {}):
+    if new_shared_plugins != _as_dict(shared.get("enabledPlugins")):
         new_shared["enabledPlugins"] = new_shared_plugins
-    if new_shared_markets != (shared.get("extraKnownMarketplaces") or {}):
+    if new_shared_markets != _as_dict(shared.get("extraKnownMarketplaces")):
         new_shared["extraKnownMarketplaces"] = new_shared_markets
-    if new_shared_env != (shared.get("env") or {}):
+    if new_shared_env != _as_dict(shared.get("env")):
         new_shared["env"] = new_shared_env
     if shared_approved or "enabledMcpjsonServers" in shared:
         new_shared["enabledMcpjsonServers"] = sorted(shared_approved)

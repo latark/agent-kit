@@ -10,12 +10,12 @@ import subprocess
 import sys
 import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+from _py311 import PY311, readonly_dirs, rmtree_force  # CLI pantheon — только на Python 3.11+
 
 _ROOT = tempfile.mkdtemp(prefix="batch-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
-atexit.register(shutil.rmtree, _ROOT, True)
+atexit.register(rmtree_force, _ROOT)  # metis-1400: каталоги 0o555 теста rmtree не берёт
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 RUN_PY = os.path.join(LIB, "run.py")
@@ -412,6 +412,9 @@ check("третий start — ветка уже в карточке: код 1, �
 
 r = subprocess.run([PY311, "-I", RUN_PY, "help"], env=env, capture_output=True, text=True)
 check("справка называет batch start|pr", "batch start|pr" in r.stdout)
+
+check("[1400] после прогона в корне временных папок нет каталогов только для чтения (0o555)", not readonly_dirs(_ROOT),
+      readonly_dirs(_ROOT))
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

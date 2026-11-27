@@ -55,6 +55,7 @@ UPDATE_TIMEOUT = 3 * 3600
 PUSH_TIMEOUT = 120
 DIED_GRACE = 120     # с: «running» без живого процесса дольше этого — работник погиб
 ALERT_KEY = "map-tick"
+NOCAT_KEY = "map-tick-nocatalog"
 WHO = "pantheon-tick"
 TERM_GRACE = 10      # с между TERM и KILL группе процессов работника (как у review test)
 
@@ -368,6 +369,13 @@ def tick(t):
     last = st.get("checked")
     if isinstance(last, (int, float)) and 0 <= t - last < CHECK_EVERY:
         return None
+    if not P.catalog_repo():  # metis-1398: без каталога agent-kit repos() пуст — не молчим, а пишем строку и тревогу
+        st["checked"] = t
+        P.write_json(state_file(), st)
+        log(t, "нет каталога")
+        P.alert_once(NOCAT_KEY, "нет каталога", "карта тестов: нет каталога agent-kit (known_marketplaces) — карта не обновляется", WHO)
+        return "нет каталога"
+    P.clear_once(NOCAT_KEY)
     todo = repos()
     if not todo:
         return None
@@ -389,12 +397,19 @@ def tick(t):
     cur = P.read_json(state_file(), {})  # работник мог уже записать итог (running/result) — их не затираем
     cur["last"] = text
     P.write_json(state_file(), cur)
-    _alert("; ".join(fails) if fails else None)
+    _alert(_real_fail(fails) if fails else None)
     return text
 
 
 def _alert(fail):
     P.alert_net(ALERT_KEY, fail[:300] if fail else None, "карта тестов: " + (fail or "")[:300], WHO)  # metis-1386
+
+
+def _real_fail(fails):
+    """metis-1403: сетевой признак — по каждой ошибке, не по склейке: сеть рядом с настоящей ошибкой не откладывает
+    тревогу о ней. → строка для alert_net: только не сетевые, если они есть, иначе все."""
+    bad = [f for f in fails if not P.net_error(f)]
+    return "; ".join(bad or fails)
 
 
 if __name__ == "__main__":
