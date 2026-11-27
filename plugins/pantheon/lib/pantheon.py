@@ -8636,7 +8636,7 @@ def manual_pages_check(quiet):
         if name in late:
             text = f"{name}: без правки {late[name]} дн. (предел {boardmd_mod().MANUAL_STALE_DAYS}) — обновить страницу или убрать из ручных"
             if quiet:
-                alert_once(key, str(late[name]), text, "check")
+                alert_once(key, str(int(mt[name])), text, "check")  # значение — mtime: число дней растёт, тревога бы шла каждые сутки
             else:
                 print(f"предупреждение · {text}")
         else:

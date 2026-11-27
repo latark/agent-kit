@@ -600,6 +600,9 @@ check("0920. check: backlog.md без правки 5 дней → предупр
       "backlog.md: без правки 5 дн." in r.stdout and "decision-map.md: без правки" not in r.stdout, r.stdout + r.stderr)
 r = cli(["check", "--quiet"])
 check("0920. check --quiet: тревога по backlog.md", "backlog.md: без правки 5 дн." in r.stdout, r.stdout + r.stderr)
+r = cli(["check", "--quiet"], NOW + 90000)
+check("0920. check --quiet через сутки: новой тревоги по backlog.md нет (значение — mtime, а не число дней)",
+      "backlog.md: без правки" not in r.stdout, r.stdout + r.stderr)
 os.utime(bl, (NOW - 3600, NOW - 3600))
 r = cli(["check"])
 check("0920. страницу поправили → предупреждения нет", "без правки" not in r.stdout, r.stdout + r.stderr)
