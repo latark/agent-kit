@@ -59,10 +59,12 @@ GIT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 DETACH_MARK = "pantheon-detach"  # метка в gitdir копии: её создал `pantheon worktree add --detach`
 BUSY = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "BISECT_LOG")
-# ключи настроек проекта, расширяющие окно, — как WIDEN_KEYS guard_rules.py (worktree-own); импорт между плагинами
-# храповик не пускает, поэтому копия: правишь там — правь и здесь (test_worktree.py сверяет)
-WIDEN_KEYS = ("hooks", "env", "enabledPlugins", "enabledMcpjsonServers", "enableAllProjectMcpServers", "apiKeyHelper",
-              "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+# ключи настроек проекта, которые окно не расширяют, — как SAFE_KEYS guard_rules.py (worktree-own, список разрешённых:
+# прочий ключ с truthy значением — отказ, metis-0915); импорт между плагинами храповик не пускает, поэтому копия:
+# правишь там — правь и здесь (test_worktree.py сверяет)
+SAFE_KEYS = ("$schema", "model", "includeCoAuthoredBy", "attribution", "cleanupPeriodDays", "outputStyle", "language",
+             "alwaysThinkingEnabled", "spinnerTipsEnabled", "companyAnnouncements", "respectGitignore",
+             "prefersReducedMotion", "showTurnDuration")
 SAFE_PERMISSIONS = ("deny", "ask")
 SAFE_SANDBOX = ("autoAllowBashIfSandboxed", "failIfUnavailable", "enabled")
 SETTINGS = ("settings.json", "settings.local.json")
@@ -257,7 +259,7 @@ def _widen_keys(data):
     """Ключи настроек проекта, расширяющие окно (как _widening в guard_rules.py)."""
     if not isinstance(data, dict):
         return []
-    keys = [k for k in WIDEN_KEYS if data.get(k)]
+    keys = [k for k, v in data.items() if v and k not in SAFE_KEYS and k not in ("permissions", "sandbox")]
     for top, safe in (("permissions", SAFE_PERMISSIONS), ("sandbox", SAFE_SANDBOX)):
         sub = data.get(top)
         if isinstance(sub, dict):
