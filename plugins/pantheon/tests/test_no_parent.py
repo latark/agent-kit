@@ -201,7 +201,9 @@ def part_check():
     nxt = dict(env, PANTHEON_NOW=str(int(NOW) + 90000))
     r3n = pan(nxt, "check", "--quiet")
     a3n = [ln for ln in r3n.stdout.splitlines() if "вне плана:" in ln]
-    check("через сутки: снова одна строка, уже с 9108 (N=4)", len(a3n) == 1 and "вне плана: 4 " in a3n[0] and "metis-9108" in a3n[0],
+    # N считает и задачи, и пачки (задача 1378): 9101, 9102 (уже старше суток), 9107, 9108 и пачка 9100
+    check("через сутки: снова одна строка, уже с 9108 (N=5: четыре задачи и пачка 9100)",
+          len(a3n) == 1 and "вне плана: 5 " in a3n[0] and "metis-9108" in a3n[0] and "metis-9100" in a3n[0],
           r3n.stdout[-300:])
     put(home, "metis-9109", "С полем batch", "x", created="2026-11-05", extra=["batch: ночь · 1"])
     put(home, "metis-9110", "Во входящих", "x", status="inbox", created="2026-11-05")
