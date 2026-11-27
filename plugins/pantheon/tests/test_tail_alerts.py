@@ -227,9 +227,12 @@ def main():
     for i in range(14):
         put(os.path.join(inbox, f"research-many-{i:02d}.md"), "# m\n")
     n0 = len(lines_with(home, "inbox"))
-    run(env, "check", "--quiet", t=T0 + 300)
-    run(env, "check", "--quiet", t=T0 + 360)
-    run(env, "check", "--quiet", t=T0 + 420)
+    counts = []   # metis-1405: сколько строк прибавил каждый проход — предел TAIL_SHOWN виден только по проходам
+    for dt in (300, 360, 420):
+        run(env, "check", "--quiet", t=T0 + dt)
+        counts.append(len(lines_with(home, "inbox")) - n0)
+    check("14 новых файлов: за первый проход не больше 12 строк (TAIL_SHOWN), вторым — остальные 2, третьим — ничего",
+          counts == [12, 14, 14], counts)
     ls = lines_with(home, "inbox")[n0:]
     # metis-1382: файл inbox — своя строка со свёрткой (alert_fold по файлу), а не одна на проход: 12 строк первым
     # проходом (TAIL_SHOWN), оставшиеся 2 — вторым, третий проход новых строк не даёт, «и ещё» в строках файлов нет
