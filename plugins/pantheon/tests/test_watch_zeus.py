@@ -808,6 +808,25 @@ def test_saved_by_copy_name_1122():
               f"saved --by {by!r}: {r.returncode} {r.stdout!r} {r.stderr!r}")
 
 
+def test_zeus_renewed_by_process_0837():
+    """metis-0837, Д4: Зевс поднят заново — по процессу (pid метки), а не по sessionId: /clear даёт новый sessionId в том же
+    процессе, и метку --status снимать не должен. Метка пишет pid сессии из claude agents; другой pid — перезапуск."""
+    sid = "5a5a5a5a-1111-4111-8111-111111111111"
+    e = Env()
+    e.agents([bg("zeus", "working", sid, pid=23)])
+    e.run("restart", "--prepare", "обновление", t=T0)
+    r = e.run("saved", "--by", "zeus", "--state", "STATUS.md", t=T0 + 20,
+              extra={"PANTHEON_SESSION": "zeus", "CLAUDE_CODE_SESSION_ID": sid})
+    mark = json.load(open(e.st("maintenance", "zeus.json"))) if os.path.exists(e.st("maintenance", "zeus.json")) else {}
+    check(mark.get("pid") == 23 and mark.get("sessionId") == sid, f"saved не записал pid процесса: {mark} {r.stderr[-200:]}")
+    e.agents([bg("zeus", "working", "bbbbbbbb-2222-4222-8222-222222222222", pid=23)])  # /clear: новый sessionId, тот же pid
+    e.run("restart", "--status", t=T0 + 40)
+    check(os.path.exists(e.st("maintenance.json")), "новый sessionId при том же pid снял метку: это не перезапуск")
+    e.agents([bg("zeus", "working", "cccccccc-3333-4333-8333-333333333333", pid=24)])  # другой процесс — перезапуск
+    e.run("restart", "--status", t=T0 + 60)
+    check(not os.path.exists(e.st("maintenance.json")), "новый процесс Зевса: метка не снята")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)

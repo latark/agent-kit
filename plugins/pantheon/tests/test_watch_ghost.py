@@ -376,7 +376,9 @@ def test_jobs_show_read_only_locks_0266():
         check(r.returncode == 0 and "Traceback" not in r.stderr and "jb-a" in r.stdout and "jb-b" in r.stdout,
               f"0266: jobs при замках без записи: {r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}")
         row_b = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-b")]
-        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and "не знаю (блокировка" in row_b[0],
+        # metis-0837, Д1: «не знаю (блокировка» дважды — в «дальше» (ветка held is None в next_run) и в состоянии; одной
+        # строки состояния хватало прежней проверке, и мутант без ветки next_run выживал
+        check(row_b and "идёт ли сейчас — не знаю" in row_b[0] and row_b[0].count("не знаю (блокировка") == 2,
               f"0266: нечитаемый замок — не «не знаю» в состоянии и в «дальше»: {row_b}")
         row_a = [ln for ln in r.stdout.splitlines() if ln.startswith("jb-a")]
         check(row_a and "идёт" not in row_a[0] and "не знаю" not in row_a[0],
@@ -406,6 +408,25 @@ def test_jobs_show_read_only_locks_0266():
               f"0266: нет файла замка: {r.returncode} {row_b} {r.stderr[-200:]}")
     finally:
         os.chmod(locks, 0o700)
+
+
+def test_jobs_lock_not_regular_0837():
+    """metis-0837, Д2: замок-ссылка (O_NOFOLLOW) и замок-папка (S_ISREG) — lock_held даёт None, показ — «не знаю». Без
+    O_NOFOLLOW ссылка на свободный обычный файл открылась бы и дала «свободен»; без S_ISREG так же открылась бы папка."""
+    e = Env()
+    e.schedule('primary_host = "mac-a"\n[[job]]\nname = "jb-a"\ncommand = "pantheon sync-answers"\nevery = "tick"\n'
+               '[[job]]\nname = "jb-b"\ncommand = "pantheon sync-answers"\nevery = "tick"\n')
+    locks = e.st("locks")
+    os.makedirs(locks, exist_ok=True)
+    target = os.path.join(locks, "elsewhere.txt")
+    open(target, "w").close()
+    os.symlink(target, os.path.join(locks, "job-jb-a.lock"))
+    os.mkdir(os.path.join(locks, "job-jb-b.lock"))
+    r = e.run("jobs", t=T0)
+    for name, what in (("jb-a", "ссылка"), ("jb-b", "папка")):
+        row = [ln for ln in r.stdout.splitlines() if ln.startswith(name)]
+        check(r.returncode == 0 and row and row[0].count("не знаю (блокировка") == 2 and "идёт ли сейчас — не знаю" in row[0],
+              f"0837: замок — {what}, а показан не «не знаю»: {r.returncode} {row} {r.stderr[-200:]}")
 
 
 def test_saved_zeus_in_read_only_state_0577():

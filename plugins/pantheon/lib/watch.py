@@ -4488,7 +4488,7 @@ def restart(rest, who):
                 skip.append(f"{n} (код {rc})")
         if not skip:
             maint_clear()
-        P.alert(f"технический перезапуск {'завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
+        P.alert(f"технический перезапуск{' завершён' if not skip else ''} ({who}): перезапущены {', '.join(done) or 'никто'}"
                 + (f"; не тронуты: {', '.join(skip)}" if skip else "")
                 + ("; Зевс — вы сами: pantheon start zeus --restart во вкладке iTerm" if owner else ""), "pantheon-restart")
         print(f"перезапущены: {', '.join(done) or 'никто'}" + (f"\nне тронуты: {', '.join(skip)} (--force — без отметки; "
@@ -4703,15 +4703,25 @@ def restart_merged(name, repo, pr, sha, who):
                        f"{name}?» и pantheon restart --only", f"Touch ID слияния {repo}#{pr}", who)
 
 
+def _same_process(a, rec):
+    """Запись a (агент или реестр имён) — тот же процесс, что записала метка rec: pid совпал и, если procStart есть с обеих
+    сторон, он тоже (pid мог достаться другому процессу)."""
+    if not rec.get("pid") or a.get("pid") != rec["pid"]:
+        return False
+    ps, rs = " ".join(str(a.get("procStart") or "").split()), " ".join(str(rec.get("procStart") or "").split())
+    return not (ps and rs) or ps == rs
+
+
 def zeus_renewed(names, saved):
     """metis-0338: Зевс (zeus*) поднят заново после `pantheon saved`. Признак — у каждого есть живая сессия с этим именем
-    (claude agents или реестр имён вкладок), и среди живых нет той, что записала saved (sessionId метки): после
-    `pantheon start zeus --restart` id другой. Метки с id нет — не знаем, False (тогда метку снимет --done)."""
+    (claude agents или реестр имён вкладок), и среди живых нет процесса, что записал saved (pid, а при наличии и procStart
+    метки): после `pantheon start zeus --restart` процесс другой. /clear даёт новый sessionId в том же процессе — это не
+    перезапуск (metis-0837, Д4), поэтому по sessionId не судим. Метки с pid нет — не знаем, False (метку снимет --done)."""
     agents, reg = P.agents_all() or [], P.sessions_registry()
     for n in names:
-        sid = (saved.get(n) or {}).get("sessionId")
+        rec = saved.get(n) or {}
         live = holders(n, agents, reg)
-        if not sid or not live or any(a.get("sessionId") == sid for a in live):
+        if not rec.get("pid") or not live or any(_same_process(a, rec) for a in live):
             return False
     return True
 
@@ -4760,6 +4770,10 @@ def hq_saved(name):
             out[k] = rec[k][:300]
     if isinstance(rec.get("sessionId"), str) and re.fullmatch(r"[0-9a-f-]{8,64}", rec["sessionId"]):
         out["sessionId"] = rec["sessionId"]
+    if isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) and rec["pid"] > 0:
+        out["pid"] = rec["pid"]
+    if isinstance(rec.get("procStart"), str):
+        out["procStart"] = rec["procStart"][:100]
     return out
 
 
@@ -4829,6 +4843,13 @@ def saved_cmd(rest, who):
     sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0421: restart --go продолжит именно эту сессию
         rec["sessionId"] = sid
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):  # metis-0837 Д4: процесс — признак перезапуска Зевса
+            for a in (P.agents_all() or []) + P.sessions_registry():
+                if a.get("sessionId") == sid and isinstance(a.get("pid"), int) and a["pid"] > 0:
+                    rec["pid"] = a["pid"]
+                    if a.get("procStart"):
+                        rec["procStart"] = str(a["procStart"])
+                    break
     if not _write_mark(name, P.path("maintenance", name + ".json"), rec):
         return 0 if name.startswith("zeus") else 1
     print(f"{name}: отмечено «сохранилась». Отчитайся Зевсу строкой (SendMessage zeus) и жди перезапуска: дальше "
