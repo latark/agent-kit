@@ -209,6 +209,7 @@ def _read_closed(full, top=None):
     ses = os.environ.get("PANTHEON_SESSION") or ""
     # настройки, которые окно получает при запуске: settings/<окно>.json и файл запуска settings/run/<сессия>.json
     # (копия с env сессии; сборка обновляет его позже, чем окно перечитывает) — deny из любого из них закрывает путь (metis-1418)
+    items = []
     files = [P.path("settings", win + ".json")] if win else []
     if ses and ses not in (".", "..") and os.sep not in ses:
         files.append(P.path("settings", "run", ses + ".json"))
