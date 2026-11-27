@@ -29,6 +29,21 @@ CARD = ("---\ntype: task\nid: %s\ntitle: \"Задача\"\nstatus: doing\nprojec
 CALL = "(P.review_criteria_gap(repo, pr, sha, view, criteria_api()) or merge_conflict(view))"
 
 
+
+
+def copy_plugin(src, dst):
+    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
+    связывала тест с bin/heavy, которого он не зовёт."""
+    os.makedirs(dst)
+    for n in sorted(os.listdir(src)):
+        if n in ("bin", "tests", "__pycache__", ".git"):
+            continue
+        s = os.path.join(src, n)
+        if os.path.isdir(s):
+            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+        else:
+            shutil.copy2(s, os.path.join(dst, n))
+
 def box(criteria=None):
     """PR ядра с «Closes metis-0001» в теле, задача с неотмеченным пунктом; запись тестов и два «принять» Opus на head,
     criteria — значения --criteria в обоих «принять» (None — без них)."""
@@ -51,8 +66,7 @@ def mutant_plugin(tmp):
     настоящий guard: соседний плагин на том же месте, что в репозитории."""
     plugins = os.path.join(tmp, "mut", "plugins")
     plug = os.path.join(plugins, "pantheon")
-    shutil.copytree(os.path.dirname(LIBDIR), plug,
-                    ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+    copy_plugin(os.path.dirname(LIBDIR), plug)
     os.symlink(os.path.dirname(GUARD_HOOKS), os.path.join(plugins, "guard"))
     f = os.path.join(plug, "lib", "merge.py")
     src = open(f, encoding="utf-8").read()

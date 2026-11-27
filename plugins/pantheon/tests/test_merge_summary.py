@@ -24,11 +24,26 @@ BODY = ("## Что сделано\n\n- правка \x1b[31mmerge.py\u202e: св
 CALL = "said[pr] = body_summary(view)"
 
 
+
+
+def copy_plugin(src, dst):
+    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
+    связывала тест с bin/heavy, которого он не зовёт."""
+    os.makedirs(dst)
+    for n in sorted(os.listdir(src)):
+        if n in ("bin", "tests", "__pycache__", ".git"):
+            continue
+        s = os.path.join(src, n)
+        if os.path.isdir(s):
+            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+        else:
+            shutil.copy2(s, os.path.join(dst, n))
+
 def mutant_run(tmp):
     """Копия плагина pantheon, где сводка — сырое тело PR → путь к её run.py (None — строка вызова не одна)."""
     plugins = os.path.join(tmp, "mut", "plugins")
     plug = os.path.join(plugins, "pantheon")
-    shutil.copytree(os.path.dirname(LIBDIR), plug, ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+    copy_plugin(os.path.dirname(LIBDIR), plug)
     os.symlink(os.path.dirname(GUARD_HOOKS), os.path.join(plugins, "guard"))
     f = os.path.join(plug, "lib", "merge.py")
     src = open(f, encoding="utf-8").read()

@@ -26,6 +26,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def copy_plugin(src, dst):
+    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
+    связывала тест с bin/heavy, которого он не зовёт."""
+    os.makedirs(dst)
+    for n in sorted(os.listdir(src)):
+        if n in ("bin", "tests", "__pycache__", ".git"):
+            continue
+        s = os.path.join(src, n)
+        if os.path.isdir(s):
+            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+        else:
+            shutil.copy2(s, os.path.join(dst, n))
+
 LIB = os.path.join(PLUGIN, "lib")
 RUN_PY = os.path.join(LIB, "run.py")
 MAP = os.path.join(PLUGIN, "plugins-by-role.toml")
@@ -361,7 +376,7 @@ check("личная роль вне карты: disallowedTools не добав�
 
 # --- битая карта: окна и роли — без неё ---
 plug = os.path.join(ROOT, "plug")
-shutil.copytree(PLUGIN, plug, ignore=shutil.ignore_patterns("tests", "__pycache__", ".git"))
+copy_plugin(PLUGIN, plug)
 write(os.path.join(plug, "plugins-by-role.toml"), CAT + '[window.hq]\nplugins = []\nmcp = ["опечатка"]\n')
 tmp3 = os.path.join(ROOT, "b")
 env3 = env_for(tmp3)
