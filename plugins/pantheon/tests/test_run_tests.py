@@ -1444,5 +1444,16 @@ for wf in ("tests.yml", "release.yml", "check-traces.yml"):
           gate in real_map["files"].get(".github/workflows/" + wf, []),
           real_map["files"].get(".github/workflows/" + wf))
 
+# metis-1359: import quarantine_ttl не пишет __pycache__ в scripts/ (грязное дерево ломало записи tests в outside)
+_cp = tempfile.mkdtemp(prefix="tmp-pyc-")
+for _f in ("run-tests.py", "quarantine_ttl.py"):
+    shutil.copy(os.path.join(PLUGIN, "scripts", _f), os.path.join(_cp, _f))
+_pl = mkplugin({"test_p.py": "print('1/1')\n"}, "pyc")
+subprocess.run([sys.executable, "-I", os.path.join(_cp, "run-tests.py"), _pl], stdin=subprocess.DEVNULL,
+               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, text=True)
+check("раннер не оставляет __pycache__ рядом с quarantine_ttl.py", not os.path.exists(os.path.join(_cp, "__pycache__")),
+      os.listdir(_cp))
+shutil.rmtree(_cp, ignore_errors=True)
+
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)

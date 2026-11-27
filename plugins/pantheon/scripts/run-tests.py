@@ -113,7 +113,12 @@ K>0; «FAIL 0» и «не прошло: 0» — чисто, metis-0556), или 
 """
 import hashlib, importlib.util, json, os, posixpath, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time  # noqa: E401
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # рядом quarantine_ttl.py: раннер идёт с -I
-import quarantine_ttl as Q
+_dwb = sys.dont_write_bytecode
+sys.dont_write_bytecode = True  # импорт не пишет scripts/__pycache__: копия репозитория остаётся чистой (записи tests, outside)
+try:
+    import quarantine_ttl as Q
+finally:
+    sys.dont_write_bytecode = _dwb
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
 # Части test_merge_gate.py (metis-1119): целый файл шёл 349 с в GitHub Actions, общее — tests/_merge_gate_common.py
