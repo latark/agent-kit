@@ -93,36 +93,27 @@ times.jsonl в папке кэша (cache_dir()): {label, sec, ok, time, j — �
 сигнал дальше, не оставляют сирот. Границы: внук, который сам ушёл в свою сессию (setsid), из группы файла выпадает,
 и killpg его не достаёт; SIGKILL самому раннеру обработать нельзя — идущие файлы тогда доживают свой таймаут.
 
-Итог: строка на каждый файл по мере готовности (ok / FAIL / карантин — файл из QUARANTINE упал, код не портит; время, число проверок), затем выводы упавших файлов
-(все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы они ни были; больше NOT_OK_MAX —
-начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
-ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
-или с итогом без проверок, или с явным провалом в выводе при коде 0 (строка с начала FAIL <имя>, НЕ ПРОШЛО,
-Traceback, «FAIL K», «не прошло: K» при K>0; «FAIL 0» и «не прошло: 0» — чисто, metis-0556), или раннер прерван сигналом.
-Папка плагина без tests/ — код 2 и строка «нет папки …/tests», как при «нет папки» (metis-0556). Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
-Храповик (metis-0854): перед тестами — scripts/lint_ratchet.py (с ним и `ruff check .`) по репозиторию первой
-папки, так его держит и запасной путь слияния (запись полного набора на head PR). И при --only: дозапуск pantheon
-outside (только упавшие файлы) тоже пишет запись полного набора, без храповика рост прошёл бы через него. Режим warn
+Итог: строка на каждый файл по мере готовности (ok / FAIL / карантин — файл из QUARANTINE упал, код не портит; время, число
+проверок), затем выводы упавших файлов (все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы
+они ни были; больше NOT_OK_MAX — начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и
+последняя строка — файлов, ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал
+(код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY) или с итогом без проверок,
+или с явным провалом в выводе при коде 0 (строка с начала FAIL <имя>, НЕ ПРОШЛО, Traceback, «FAIL K», «не прошло: K» при
+K>0; «FAIL 0» и «не прошло: 0» — чисто, metis-0556), или раннер прерван сигналом. Папка плагина без tests/ — код 2 и строка
+«нет папки …/tests», как при «нет папки» (metis-0556). Число проверок файла — из его итоговой строки, без числа в ней — по
+строкам `ok`. Храповик (metis-0854): перед тестами — scripts/lint_ratchet.py (с ним и `ruff check .`) по репозиторию первой
+папки, так его держит и запасной путь слияния (запись полного набора на head PR). И при --only: дозапуск pantheon outside
+(только упавшие файлы) тоже пишет запись полного набора, без храповика рост прошёл бы через него. Режим warn
 (scripts/lint-ratchet-mode, сейчас так) — храповик сам отдаёт код 0 и строку «предупреждение», код тестов тот же. Красный
-(режим fail) — код 1 и его причина последней строкой после итога; нет ruff закреплённой версии (код 2) — строка «skip lint_ratchet · пропущено» и код тестов;
-папка не в репозитории с храповиком (временные плагины тестов раннера) — без строки.
-При старте раннер убирает брошенные папки `py311-path-<pid>-*` в TMPDIR (sweep_py311_mirrors, metis-1309): тест, убитый
-SIGKILL по таймауту, их не убрал. Свои (uid, не ссылка), создатель мёртв или папка старше суток.
-Только stdlib.
+(режим fail) — код 1 и его причина последней строкой после итога; сбой самого храповика (таймаут, трассировка) в warn не
+красит, код 0 и «предупреждение»; нет ruff закреплённой версии (код 2) — строка «skip lint_ratchet · пропущено» и код
+тестов; папка не в репозитории с храповиком (временные плагины тестов раннера) — без строки. При старте раннер убирает
+брошенные папки `py311-path-<pid>-*` в TMPDIR (sweep_py311_mirrors, metis-1309): тест, убитый SIGKILL по таймауту, их не
+убрал. Свои (uid, не ссылка), создатель мёртв или папка старше суток. Только stdlib.
 """
-import hashlib
-import json
-import os
-import posixpath
-import re
-import shutil
-import signal
-import socket
-import stat
-import subprocess
-import sys
-import tempfile
-import time
+import hashlib, importlib.util, json, os, posixpath, re, shutil, signal, socket, stat, subprocess, sys, tempfile, time  # noqa: E401
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # рядом quarantine_ttl.py: раннер идёт с -I
+import quarantine_ttl as Q
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
 # Части test_merge_gate.py (metis-1119): целый файл шёл 349 с в GitHub Actions, общее — tests/_merge_gate_common.py
@@ -198,14 +189,10 @@ NO_SUMMARY = frozenset({
 SKIP_NOT_MAC = {
     "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
 }
-# Карантин (metis-1050, решение владельца 09.11): файлы, которые падают только под нагрузкой полного набора и
-# зелёные отдельно. Их падение печатается строкой `карантин <метка> · <причина> · задача <id>` и выводом в итоге, но
-# код прогона не портит: нестабильный тест не держит слияние. У каждого — задача на починку; починили — убрать из
-# списка. Большие файлы ядра (test_guard, test_hookd, test_outside) сюда целиком не кладут: их настоящие падения
-# тогда тоже прошли бы молча.
-QUARANTINE = {
-    "pantheon/test_outside_idle.py": "metis-0989",  # «без ps молчащий sleep гасится по тишине» под нагрузкой
-}
+# Карантин (metis-1050; срок и лимит — metis-1359, quarantine_ttl.py): {метка: ("metis-NNNN" задача на починку, "ГГГГ-ММ-ДД" срок:
+# сегодня + 7 дней)}. Упавший файл с живой записью — строка `карантин …`, код не портит; просроченная — обычный FAIL; записей
+# больше 5 — отказ раннера (код 2). Файлы ядра (test_guard, test_hookd, test_outside) сюда целиком не кладут.
+QUARANTINE = {}
 # Окно роли (metis-0773): песочница режет запись `.claude/agents` и `.git/{config,hooks}` под папкой tmp кэша окна
 # (PANTHEON_TMP), где TMPDIR раннера. Эти файлы строят в своих временных папках поддельный HOME с ролями и репозитории
 # `git init`, поэтому в окне падали на пустом месте. Им раннер даёт корень в /tmp/claude-<uid> (там запись есть, сокетов
@@ -1260,8 +1247,8 @@ def pick_affected(items, dirs, base, map_path=None):
 
 def main(argv):
     opts = parse(argv)
-    if not opts["dirs"]:
-        print(__doc__)
+    if not opts["dirs"] or (why := Q.refuse(QUARANTINE)):  # без папок — справка, лишние записи карантина — причина (metis-1359)
+        print(__doc__ if not opts["dirs"] else why)
         return 2
     for d in opts["dirs"]:
         if not os.path.isdir(d):
@@ -1413,9 +1400,9 @@ def main(argv):
 
 
 def report(job, log_dir):
-    task = None if job.ok else QUARANTINE.get(job.label)
-    mark = "ok  " if job.ok else "карантин" if task else "FAIL"
-    why = "" if job.ok else f" · {job.why}" + (f" · задача {task}" if task else "")
+    note = "" if job.ok else Q.note(QUARANTINE, job.label)
+    mark = "ok  " if job.ok else "карантин" if Q.active(QUARANTINE, job.label) else "FAIL"
+    why = "" if job.ok else f" · {job.why}" + (f" · {note}" if note else "")
     print(f"{mark} {job.label} · {job.sec:.1f} с · проверок {job.n}{why}", flush=True)
     if log_dir:
         with open(os.path.join(log_dir, job.label.replace("/", "__") + ".log"), "w") as fh:
@@ -1433,11 +1420,11 @@ def not_ok(out, limit=NOT_OK_MAX):
 
 
 def summary(done, total_files, n, sec, skipped=0, window_skipped=0, cached=0):
-    bad = [j for j in done if not j.ok and j.label not in QUARANTINE]
-    quar = [j for j in done if not j.ok and j.label in QUARANTINE]
+    bad = [j for j in done if not j.ok and not Q.active(QUARANTINE, j.label)]
+    quar = [j for j in done if not j.ok and Q.active(QUARANTINE, j.label)]
     for j in bad + quar:
         lines, total = not_ok(j.out)
-        tag = f"карантин, задача {QUARANTINE[j.label]} · " if j in quar else ""
+        tag = (Q.note(QUARANTINE, j.label) + " · ") if Q.note(QUARANTINE, j.label) else ""
         print(f"\n===== {j.label} · {tag}{j.why} · строки не ok: {total} =====")
         print("\n".join(lines))
         # где файл остановился (таймаут, гибель посреди строк ok) — последние строки, если ими список не кончается
@@ -1461,7 +1448,7 @@ def summary(done, total_files, n, sec, skipped=0, window_skipped=0, cached=0):
 
 
 RATCHET = os.path.join("plugins", "pantheon", "scripts", "lint_ratchet.py")
-RATCHET_TIMEOUT = 300
+RATCHET_TIMEOUT = int(os.environ.get("RUN_TESTS_RATCHET_TIMEOUT", "300"))
 
 
 def ratchet(dirs):
@@ -1473,12 +1460,19 @@ def ratchet(dirs):
     script = os.path.join(root, RATCHET)
     if not os.path.isfile(script):
         return None
+    spec = importlib.util.spec_from_file_location("lint_ratchet_mode", script)  # режим — из храповика самой копии
+    lr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lr)
+    warn = lr.ratchet_mode(root) == "warn"  # warn: сбой самого храповика (таймаут, трассировка) раннер не красит (metis-0878)
     try:
         r = subprocess.run([sys.executable, "-I", script, "--root", root], stdin=subprocess.DEVNULL, capture_output=True,
                            text=True, timeout=RATCHET_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return 1, [f"храповик не уложился в {RATCHET_TIMEOUT} с"]
-    return r.returncode, (r.stdout + r.stderr).strip().splitlines() or [f"храповик: код {r.returncode} без вывода"]
+        return int(not warn), [f"храповик не уложился в {RATCHET_TIMEOUT} с" + (" — предупреждение, режим warn" if warn else "")]
+    lines = (r.stdout + r.stderr).strip().splitlines() or [f"храповик: код {r.returncode} без вывода"]
+    if warn and r.returncode == 1:  # в warn нарушения он сам отдаёт кодом 0: код 1 — сбой
+        return 0, lines + ["храповик: сбой в режиме warn — предупреждение, код 0"]
+    return r.returncode, lines
 
 
 def run_all(argv):

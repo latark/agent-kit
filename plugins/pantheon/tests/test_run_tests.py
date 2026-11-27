@@ -6,6 +6,7 @@
 import ast
 import atexit
 import contextlib
+import datetime
 import hashlib
 import importlib.util
 import io
@@ -419,9 +420,12 @@ missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if
 check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
 
 # --- карантин (metis-1050): упавший файл из QUARANTINE — строка «карантин», код прогона 0; другой FAIL — код 1 ---
-missing = [lb for lb, task in R.QUARANTINE.items() if not re.fullmatch(r"metis-\d{4}", task) or not os.path.exists(
+missing = [lb for lb in R.QUARANTINE if not os.path.exists(
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
-check("QUARANTINE — существующие файлы, у каждого задача metis-NNNN", R.QUARANTINE and not missing, missing)
+check("QUARANTINE — существующие файлы, у каждого (metis-NNNN, срок), записей не больше лимита",
+      not missing and R.Q.refuse(R.QUARANTINE) is None, (missing, R.Q.refuse(R.QUARANTINE)))
+check("QUARANTINE — test_outside_idle убран (metis-0989: 13 ночей зелёный на CI)",
+      "pantheon/test_outside_idle.py" not in R.QUARANTINE, R.QUARANTINE)
 
 
 def _core_names():
@@ -460,18 +464,57 @@ check("core_quarantine: guard/*, тесты файлов ядра — найде
           "pantheon/test_roles_harness.py", "pantheon/test_answers.py"], _core_names())
 check("QUARANTINE — без меток guard/* и тестов файлов ядра (metis-1068)", not core_quarantine(R.QUARANTINE),
       core_quarantine(R.QUARANTINE))
-qlabel = next(iter(R.QUARANTINE))
-qp = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n", "test_fine.py": OK2},
-              qlabel.split("/")[0])
-r = run([qp])
+
+
+def qmain(quarantine, files, plugin="pantheon"):
+    """R.main по временному плагину с подставленным QUARANTINE (metis-1359) → (код, вывод)."""
+    saved = R.QUARANTINE, R.fs_probe, R.bind_probe
+    R.QUARANTINE, R.fs_probe, R.bind_probe = quarantine, lambda b: None, lambda: None
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = R.main([mkplugin(files, plugin), "-j", "2"])
+    finally:
+        R.QUARANTINE, R.fs_probe, R.bind_probe = saved
+    return rc, buf.getvalue()
+
+
+QL = "pantheon/test_flaky.py"
+BAD = "import sys\nprint('ok   a')\nsys.exit(1)\n"
+TODAY = datetime.date.today()
+LIVE = {QL: ("metis-1359", "2099-01-01")}
+rc, out = qmain(LIVE, {"test_flaky.py": BAD, "test_fine.py": OK2})
 check("карантин: файл из списка упал — строка «карантин … задача», итог «карантин 1», код 0",
-      r.returncode == 0 and f"карантин {qlabel}" in r.stdout and f"задача {R.QUARANTINE[qlabel]}" in r.stdout
-      and "FAIL 0, карантин 1" in r.stdout, r.stdout)
-qp2 = mkplugin({qlabel.split("/")[1]: "import sys\nprint('ok   a')\nsys.exit(1)\n",
-                "test_bad.py": "import sys\nprint('ok   a')\nsys.exit(1)\n"}, qlabel.split("/")[0])
-r = run([qp2])
-check("карантин: рядом упал файл не из списка — код 1, FAIL 1", r.returncode == 1 and "FAIL 1, карантин 1" in r.stdout,
-      r.stdout)
+      rc == 0 and f"карантин {QL}" in out and "задача metis-1359" in out and "FAIL 0, карантин 1" in out, (rc, out))
+rc, out = qmain(LIVE, {"test_flaky.py": BAD, "test_bad.py": BAD})
+check("карантин: рядом упал файл не из списка — код 1, FAIL 1", rc == 1 and "FAIL 1, карантин 1" in out, (rc, out))
+# metis-1359: срок
+rc, out = qmain({QL: ("metis-1359", "2020-01-01")}, {"test_flaky.py": BAD, "test_fine.py": OK2})
+check("карантин просрочен: упавший файл — обычный FAIL, код 1, строка «карантин просрочен»",
+      rc == 1 and f"FAIL {QL}" in out and "карантин просрочен: задача metis-1359, срок 2020-01-01" in out
+      and "FAIL 1;" in out and f"карантин {QL}" not in out, (rc, out))
+rc, out = qmain({QL: ("metis-1359", TODAY.isoformat())}, {"test_flaky.py": BAD, "test_fine.py": OK2})
+check("карантин: в день срока запись ещё жива — код 0", rc == 0 and "FAIL 0, карантин 1" in out, (rc, out))
+rc, out = qmain({QL: ("metis-1359", (TODAY - datetime.timedelta(days=1)).isoformat())}, {"test_flaky.py": BAD})
+check("карантин: на следующий день после срока — FAIL, код 1", rc == 1 and "карантин просрочен" in out, (rc, out))
+rc, out = qmain({QL: ("metis-1359", "2020-01-01")}, {"test_flaky.py": OK2})
+check("карантин просрочен, а файл зелёный — код 0, строки FAIL нет", rc == 0 and "FAIL 0;" in out, (rc, out))
+check("Q.TTL_DAYS — 7, Q.MAX — 5 (решение 27.11)", (R.Q.TTL_DAYS, R.Q.MAX) == (7, 5))
+# metis-1359: лимит записей
+five = {f"pantheon/test_q{i}.py": ("metis-1359", "2099-01-01") for i in range(5)}
+rc, out = qmain(five, {"test_fine.py": OK2})
+check("карантин: 5 записей — лимит не сработал, прогон идёт", rc == 0 and "файлов 1, ok 1" in out, (rc, out))
+rc, out = qmain({**five, "pantheon/test_q5.py": ("metis-1359", "2099-01-01")}, {"test_fine.py": OK2})
+check("карантин: 6 записей — отказ, код 2, причина последней строкой, ни один файл не гонялся",
+      rc == 2 and out.strip().splitlines()[-1].startswith("run-tests: карантин: записей 6, больше 5")
+      and "ok   " not in out and "итого" not in out, (rc, out))
+rc, out = qmain({QL: "metis-0989"}, {"test_fine.py": OK2})
+check("карантин: запись не (задача, срок) — отказ, код 2, причина последней строкой",
+      rc == 2 and out.strip().splitlines()[-1].startswith(f"run-tests: карантин: запись {QL}"), (rc, out))
+for bad in (("metis-1", "2099-01-01"), ("metis-1359", "завтра"), ("metis-1359", None)):
+    rc, out = qmain({QL: bad}, {"test_fine.py": OK2})
+    check(f"карантин: запись {bad} — отказ, код 2", rc == 2 and "карантин: запись" in out, (rc, out))
+
 
 # --- --affected: карта affected-map.json и выбор по ней (metis-0451) ---
 REPO = os.path.dirname(os.path.dirname(PLUGIN))

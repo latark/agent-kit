@@ -248,7 +248,7 @@ def t_runner_lists():
     # Д4: SKIP_NOT_MAC (вне macOS) и QUARANTINE — из подменённого раннера, а не настоящих списков run-tests.py
     runner = fake_runner("lists", skip={"demo/test_mac.py": ("подмена: только macOS", None),
                                         "demo/test_unless.py": ("подмена: есть sh", "/bin/sh")},
-                         quarantine={"demo/test_q.py": "metis-9999"})
+                         quarantine={"demo/test_q.py": ("metis-9999", "2099-01-01")})
     repo = make("lists", {"plugins/demo/lib.py": LIB2,
                           "plugins/demo/tests/test_mac.py": "import sys\nsys.exit(1)\n",
                           "plugins/demo/tests/test_q.py": "import sys\nsys.exit(1)\n",

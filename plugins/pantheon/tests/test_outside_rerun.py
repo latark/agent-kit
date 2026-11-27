@@ -120,7 +120,8 @@ with open(RUNNER) as fh:
 LINE = f"{sys.executable} -I tools/run-tests.py -j 2 plugins/kit"
 files = {f"plugins/kit/tests/test_{x}.py": TEST_SRC.format(x=x) for x in NAMES}
 files.update({f"plugins/kit/lib/{x}.txt": "good\n" for x in NAMES})
-files.update({"tools/run-tests.py": RUNNER_SRC, "plugins/kit/tests/_h.py": "# общий модуль тестов\n",
+files.update({"tools/run-tests.py": RUNNER_SRC, "tools/quarantine_ttl.py": open(os.path.join(os.path.dirname(RUNNER), "quarantine_ttl.py")).read(),
+              "plugins/kit/tests/_h.py": "# общий модуль тестов\n",
               "plugins/kit/bin/heavy": "#!/bin/sh\nexec \"$@\"\n", "README.md": "rk\n",
               ".pantheon-verify": f"# полный набор\nheavy {LINE}\n"})
 
