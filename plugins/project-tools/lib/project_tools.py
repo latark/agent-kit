@@ -33,6 +33,8 @@ requirements*.txt, либо файл) → какие MCP-серверы и пл�
                                 и на другом Mac без ручного шага (решение владельца 14.11, metis-1047). Имена, которых
                                 в .mcp.json нет, снимает. enableAllProjectMcpServers здесь не ставит.
                                 enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
+                                extraKnownMarketplaces, env: маркетплейс и переменные плагина, если карта их называет
+                                (modern-web-guidance: googlechrome и DISABLE_TELEMETRY=1); чужое значение env не меняет
   .claude/settings.local.json   личный, только чистится: enableAllProjectMcpServers заменяет списком серверов, которые
                                 уже лежат в .mcp.json (их вы одобрили этим флагом), — новый сервер из репозитория без
                                 вопроса больше не запустится; снимает одобрения имён, которых в .mcp.json нет
@@ -218,6 +220,8 @@ def scan(root):
             try:
                 if e.is_file(follow_symlinks=False):
                     files.add(e.name)
+                    if e.name == "manifest.json" and "manifest_version" in read_json_quiet(e.path):
+                        files.add("manifest.json:manifest_version")  # расширение Chrome, а не манифест PWA
                     if e.name == "package.json":
                         for name, spec in package_deps(e.path).items():
                             deps.setdefault(name, []).append((str(spec), folder))
@@ -489,6 +493,8 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     approve, codex = set(), {}
     new_shared_plugins = dict(shared.get("enabledPlugins") or {})
     new_local_plugins = dict(local.get("enabledPlugins") or {})
+    new_shared_markets = dict(shared.get("extraKnownMarketplaces") or {})
+    new_shared_env = dict(shared.get("env") or {})
     have_plugins = None
 
     for name in p.wanted:
@@ -536,19 +542,37 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         elif "plugin" in tool:
             plugin = tool["plugin"]
             state = plugin_value(plugin, local, shared, user)
-            if state:
-                continue
-            if (local.get("enabledPlugins") or {}).get(plugin) is False or \
-                    (shared.get("enabledPlugins") or {}).get(plugin) is False:
+            if not state and ((local.get("enabledPlugins") or {}).get(plugin) is False or
+                              (shared.get("enabledPlugins") or {}).get(plugin) is False):
                 p.notes.append(f"{name}: плагин {plugin} выключен в настройках проекта — не включаю")
+                continue
+            # сторонний маркетплейс и env плагина — в общие настройки проекта, а не во все сессии
+            mkt = tool.get("marketplace")
+            if mkt and mkt["name"] not in new_shared_markets:
+                new_shared_markets[mkt["name"]] = {"source": mkt["source"]}
+                p.changes.append(f".claude/settings.json: маркетплейс {mkt['name']} добавлен ({mkt['source']['repo']})")
+                if name not in p.missing:
+                    p.missing.append(name)
+            for key, val in (tool.get("env") or {}).items():
+                if key not in new_shared_env:
+                    new_shared_env[key] = val
+                    p.changes.append(f".claude/settings.json: env {key}={val} ({name})")
+                    if name not in p.missing:
+                        p.missing.append(name)
+                elif new_shared_env[key] != val:
+                    p.notes.append(f"{name}: env {key} в settings.json = {new_shared_env[key]!r}, карта велит {val!r} — "
+                                   "не меняю")
+            if state:
                 continue
             new_shared_plugins[plugin] = True
             p.changes.append(f".claude/settings.json: плагин {plugin} включён")
-            p.missing.append(name)
+            if name not in p.missing:
+                p.missing.append(name)
             if have_plugins is None:
                 have_plugins = installed_plugins()
             if plugin not in have_plugins:
-                p.notes.append(f"{name}: плагин {plugin} не установлен — `claude plugin install {plugin}`")
+                add = f"`claude plugin marketplace add {mkt['source']['repo']}`, затем " if mkt else ""
+                p.notes.append(f"{name}: плагин {plugin} не установлен — {add}`claude plugin install {plugin}`")
 
     # .mcp.json
     if new_servers != servers:
@@ -592,6 +616,10 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     new_shared = dict(shared)
     if new_shared_plugins != (shared.get("enabledPlugins") or {}):
         new_shared["enabledPlugins"] = new_shared_plugins
+    if new_shared_markets != (shared.get("extraKnownMarketplaces") or {}):
+        new_shared["extraKnownMarketplaces"] = new_shared_markets
+    if new_shared_env != (shared.get("env") or {}):
+        new_shared["env"] = new_shared_env
     if shared_approved or "enabledMcpjsonServers" in shared:
         new_shared["enabledMcpjsonServers"] = sorted(shared_approved)
     if new_shared != shared:

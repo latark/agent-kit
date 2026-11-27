@@ -42,6 +42,13 @@
       "plugin": "pyright-lsp@claude-plugins-official",
       "source": "каталог claude-plugins-official, автор Anthropic"
     },
+    "modern-web-guidance": {
+      "about": "руководства Google по современному вебу и расширениям Chrome (навыки modern-web-guidance и chrome-extensions); сам зовёт npx @latest, поэтому телеметрия выключена и плагин только в проекте",
+      "plugin": "modern-web-guidance@googlechrome",
+      "marketplace": { "name": "googlechrome", "source": { "source": "github", "repo": "GoogleChrome/modern-web-guidance" } },
+      "env": { "DISABLE_TELEMETRY": "1" },
+      "source": "https://github.com/GoogleChrome/modern-web-guidance — маркетплейс googlechrome, вендор Google; решение владельца 27.11, пилот в browser-bridge до ~11.12 (metis-1358)"
+    },
     "typescript-lsp": {
       "about": "TypeScript и JavaScript: навигация и диагностика (языковой сервер)",
       "plugin": "typescript-lsp@claude-plugins-official",
@@ -92,6 +99,12 @@
       "name": "TypeScript",
       "dependency": "typescript",
       "tools": { "typescript-lsp": {} }
+    },
+    {
+      "name": "Расширение Chrome",
+      "file": "manifest.json:manifest_version",
+      "show_version": false,
+      "tools": { "modern-web-guidance": {} }
     }
   ]
 }
