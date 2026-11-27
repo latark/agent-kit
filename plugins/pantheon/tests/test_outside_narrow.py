@@ -114,7 +114,8 @@ with open(RUNNER) as fh:
 LINE = f"{sys.executable} -I tools/run-tests.py -j 2 plugins/kit"
 FILES = {f"plugins/kit/tests/test_{x}.py": TEST_SRC.format(x=x) for x in NAMES}
 FILES.update({f"plugins/kit/lib/{x}.txt": "good\n" for x in NAMES})
-FILES.update({"tools/run-tests.py": RUNNER_SRC, "README.md": "rk\n", ".pantheon-verify": f"heavy {LINE}\n"})
+FILES.update({"tools/run-tests.py": RUNNER_SRC, "tools/quarantine_ttl.py": open(os.path.join(os.path.dirname(RUNNER), "quarantine_ttl.py")).read(),
+               "README.md": "rk\n", ".pantheon-verify": f"heavy {LINE}\n"})
 
 
 def test_hash(x):
@@ -382,7 +383,7 @@ for name, extra in (("короткий", {"base": M1[:12]}), ("заглавны�
 # --- 8. карантин раннера (metis-1050): упал файл из QUARANTINE — код 0, итог разобран, запись tests есть ------------
 git("checkout", "-q", "-b", "quar", B0)
 assert RUNNER_SRC.count("QUARANTINE = {") == 1
-Q1 = commit({"tools/run-tests.py": RUNNER_SRC.replace("QUARANTINE = {", 'QUARANTINE = {"kit/test_c.py": "metis-0000",'),
+Q1 = commit({"tools/run-tests.py": RUNNER_SRC.replace("QUARANTINE = {", 'QUARANTINE = {"kit/test_c.py": ("metis-0000", "2099-01-01"),'),
              "plugins/kit/lib/c.txt": "bad\n"}, "q1: c красный, но в карантине раннера")
 rq = run()
 recq = tests_for(Q1)
