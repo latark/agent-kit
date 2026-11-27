@@ -29,6 +29,21 @@ ALERTED = 76
 results = []
 
 
+
+
+def copy_plugin(src, dst):
+    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
+    связывала тест с bin/heavy, которого он не зовёт."""
+    os.makedirs(dst)
+    for n in sorted(os.listdir(src)):
+        if n in ("bin", "tests", "__pycache__", ".git"):
+            continue
+        s = os.path.join(src, n)
+        if os.path.isdir(s):
+            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+        else:
+            shutil.copy2(s, os.path.join(dst, n))
+
 def check(name, ok):
     results.append(bool(ok))
     print(("ok  " if ok else "FAIL") + " " + name)
@@ -153,7 +168,7 @@ def copy_with(edit):
     """Копия плагина, в одном файле lib которой подменена строка: (файл, было, стало) → путь lib копии или None."""
     fname, old, new = edit
     dst = tempfile.mkdtemp(prefix="tmp-jobdir-mut-")
-    shutil.copytree(PLUGIN, os.path.join(dst, "pantheon"), ignore=shutil.ignore_patterns("__pycache__", "tests"))
+    copy_plugin(PLUGIN, os.path.join(dst, "pantheon"))
     lib = os.path.join(dst, "pantheon", "lib")
     p = os.path.join(lib, fname)
     src = open(p, encoding="utf-8").read()

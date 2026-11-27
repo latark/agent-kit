@@ -104,7 +104,7 @@ def alive(pat):
 
 SPIN = "python3 -c 'while True: pass'"   # одна строка: .pantheon-verify читается построчно
 
-res, dt = run("echo started-ok; sleep 31337")
+res, dt = run("echo started-ok; sleep 31347")
 log = open(res["log"]).read() if res.get("log") else ""
 check("молчащий sleep гасится по тишине: failed, why «тишина» и последняя строка",
       res.get("state") == "failed" and "тишина" in res.get("why", "") and "started-ok" in res["why"]
@@ -112,7 +112,8 @@ check("молчащий sleep гасится по тишине: failed, why «т
 check("причина — в логе прогона и в outside.jsonl", "тишина" in log and any(
     e.get("kind") == "test-silent" and "тишина" in e.get("why", "") for e in events()), (log, events()))
 time.sleep(0.3)
-check("дерево убито: sleep не жив", not alive("sleep 31337"))
+# свой номер sleep: 31337 держит test_outside_test_keys.py, и pgrep -f видит его из соседнего процесса той же части (metis-1431)
+check("дерево убито: sleep не жив", not alive("sleep 31347"))
 
 res, dt = run("while :; do echo tick; sleep 0.5; done", timeout=12,
           idle=8)  # промежуток тиков ≪ срока тишины, с запасом на нагрузку

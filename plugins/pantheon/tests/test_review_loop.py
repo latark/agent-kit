@@ -24,6 +24,21 @@ ROUND = "REVIEW_LOOP_ROUND = 3\n"
 LAST = 'last != "вернуть" or '
 
 
+
+
+def copy_plugin(src, dst):
+    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
+    связывала тест с bin/heavy, которого он не зовёт."""
+    os.makedirs(dst)
+    for n in sorted(os.listdir(src)):
+        if n in ("bin", "tests", "__pycache__", ".git"):
+            continue
+        s = os.path.join(src, n)
+        if os.path.isdir(s):
+            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+        else:
+            shutil.copy2(s, os.path.join(dst, n))
+
 def stamp(t):
     return datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds")
 
@@ -52,7 +67,7 @@ def mutant_lib(tmp, old, new):
     """Копия плагина pantheon с заменой old → new в lib/review.py → путь к её lib (None — old не один)."""
     plugins = os.path.join(tmp, "mut", "plugins")
     plug = os.path.join(plugins, "pantheon")
-    shutil.copytree(os.path.dirname(LIBDIR), plug, ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
+    copy_plugin(os.path.dirname(LIBDIR), plug)
     os.symlink(os.path.dirname(GUARD_HOOKS), os.path.join(plugins, "guard"))   # соседний плагин, как в репозитории
     f = os.path.join(plug, "lib", "review.py")
     src = open(f, encoding="utf-8").read()
