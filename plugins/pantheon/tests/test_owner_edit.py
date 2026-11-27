@@ -1280,5 +1280,101 @@ IDLE[0] = 10 ** 6
 run()
 check("settings.json: «да» — применено", read(SET) == SET_NEW, journal())
 
+# --- [hooks] hooks.json пакета — только сужение: убрать хук или --always (metis-1435) ------------------------------
+HK_REL = "~/.claude/pantheon/packs/demo-pack/hooks/hooks.json"
+HK = os.path.join(HOME, ".claude", "pantheon", "packs", "demo-pack", "hooks", "hooks.json")
+HK_LEAD = 'python3 -I "${CLAUDE_PLUGIN_ROOT}/../_bin/in_repo.py" '
+HK_CMD = HK_LEAD + '"$HOME/p/mail" --always -- python3 -I .claude/hooks/%s.py'
+
+
+def hk(groups, **top):
+    return json.dumps(dict(top, hooks={"PreToolUse": groups}), indent=2) + "\n"
+
+
+def hk_group(matcher, *names, cmd=HK_CMD, **extra):
+    return {"matcher": matcher, "hooks": [dict({"type": "command", "command": cmd % n, "timeout": 10,
+                                                "onFailure": "block"}, **extra) for n in names]}
+
+
+HK_OLD = hk([hk_group("Bash", "guard_bash"), hk_group("Read|Grep|Glob", "guard_read", "guard_glob")])
+HK_NARROW = {
+    "снят --always у всех хуков": HK_OLD.replace(" --always", ""),
+    "снят --always у одного хука": HK_OLD.replace(" --always", "", 1),
+    "убран хук из группы": hk([hk_group("Bash", "guard_bash"), hk_group("Read|Grep|Glob", "guard_read")]),
+    "убрана группа": hk([hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "убраны все группы события": hk([]),
+}
+for what, new_t in HK_NARROW.items():
+    fresh()
+    write(HK, HK_OLD)
+    rc, out, errs = propose(HK_REL, new_t)
+    check(f"hooks.json пакета: {what} — заявка принята", rc == 0 and len(reqs()) == 1, (rc, errs))
+fresh()
+write(HK, HK_OLD)
+HK_NEW = HK_NARROW["снят --always у всех хуков"]
+propose(HK_REL, HK_NEW)
+_, req, _ = reqs()[0] if reqs() else (None, {}, None)
+answer(yes_question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("hooks.json пакета: снят --always, «да» — применено", read(HK) == HK_NEW, journal())
+check("hooks.json пакета: команда без --always проходит window_rules", [
+    P.WINDOW_RULES.pack_hook_problem(h["command"]) for g in json.loads(HK_NEW)["hooks"]["PreToolUse"]
+    for h in g["hooks"]] == [None, None, None])
+
+HK_WIDEN = {
+    "добавлен хук в группу": hk([hk_group("Bash", "guard_bash", "guard_x"),
+                                 hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "добавлена группа": hk([hk_group("Bash", "guard_bash"), hk_group("Read|Grep|Glob", "guard_read", "guard_glob"),
+                            hk_group("Edit", "guard_edit")]),
+    "добавлено событие": json.dumps({"hooks": {"PreToolUse": json.loads(HK_OLD)["hooks"]["PreToolUse"],
+                                               "PostToolUse": [hk_group("Bash", "guard_bash")]}}) + "\n",
+    "хук повторён вместо убранного": hk([hk_group("Bash", "guard_bash"),
+                                         hk_group("Read|Grep|Glob", "guard_read", "guard_read")]),
+    "сменён matcher": hk([hk_group("Bash|Edit", "guard_bash"), hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "сменён timeout": hk([hk_group("Bash", "guard_bash", timeout=600),
+                          hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "timeout 10 → 10.0": HK_OLD.replace('"timeout": 10', '"timeout": 10.0', 1),
+    "onFailure block → allow": HK_OLD.replace('"block"', '"allow"', 1),
+    "убран onFailure": hk([{"matcher": "Bash", "hooks": [{"type": "command", "command": HK_CMD % "guard_bash",
+                                                          "timeout": 10}]},
+                           hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "добавлено поле хука": hk([hk_group("Bash", "guard_bash", once=True),
+                               hk_group("Read|Grep|Glob", "guard_read", "guard_glob")]),
+    "сменён скрипт в command": HK_OLD.replace("guard_bash.py", "other.py"),
+    "сменён репозиторий в command": HK_OLD.replace("$HOME/p/mail", "$HOME/p/other", 1),
+    "--always заменён другим флагом": HK_OLD.replace("--always", "--ok", 1),
+    "--always снят и кавычки другие": HK_OLD.replace(' --always', '', 1).replace('\\"$HOME/p/mail\\"', "'$HOME/p/mail'", 1),
+    "порядок групп другой": hk([hk_group("Read|Grep|Glob", "guard_read", "guard_glob"), hk_group("Bash", "guard_bash")]),
+    "добавлен ключ рядом с hooks": hk([hk_group("Bash", "guard_bash"),
+                                       hk_group("Read|Grep|Glob", "guard_read", "guard_glob")], description="x"),
+    "не JSON": "{\n",
+    "нет объекта hooks": '{"hooks": []}\n',
+}
+for what, new_t in HK_WIDEN.items():
+    fresh()
+    write(HK, HK_OLD)
+    rc, out, errs = propose(HK_REL, new_t)
+    check(f"hooks.json пакета: {what} — отказ", rc == 2 and not reqs() and "отказ" in errs, (rc, errs))
+# --always внутри пути в кавычках и после «--» — не флаг обёртки: снимать нельзя
+for what, old_cmd in (("--always в пути в кавычках", HK_LEAD + '"$HOME/p --always x" -- python3 -I .claude/hooks/%s.py'),
+                      ("--always аргумент скрипта", HK_LEAD + '"$HOME/p" -- python3 -I .claude/hooks/%s.py --always x')):
+    fresh()
+    old_t = hk([hk_group("Bash", "guard_bash", cmd=old_cmd)])
+    write(HK, old_t)
+    rc, out, errs = propose(HK_REL, old_t.replace(" --always", ""))
+    check(f"hooks.json пакета: {what} — снять нельзя, отказ", rc == 2 and not reqs(), (rc, errs))
+# заявка мимо propose: проход сверяет то же
+fresh()
+write(HK, HK_OLD)
+HK_BAD = HK_WIDEN["добавлен хук в группу"]
+_, req = queue_req(HK_OLD, HK_BAD, rel=".claude/pantheon/packs/demo-pack/hooks/hooks.json")
+answer(OE.question(req), "А — Да, применить")
+IDLE[0] = 10 ** 6
+run()
+check("hooks.json пакета: добавлен хук, заявка мимо propose с «да» — проход отказал, файл не тронут",
+      read(HK) == HK_OLD and result(req).get("state") == "refused" and "не сужение" in result(req).get("note", ""),
+      (result(req), journal()))
+
 print(f"\n{TOTAL[0] - len(FAILS)}/{TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)

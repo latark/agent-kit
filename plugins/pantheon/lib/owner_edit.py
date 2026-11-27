@@ -20,7 +20,10 @@
 Какие файлы (FILES, путь от HOME, ссылки и чужие файлы — отказ): ~/.claude/pantheon/policy.toml, grants.toml
 (metis-0680; нет файла — заводит первая заявка), packs/<направление>/mcp.json (metis-0949: пакет окна —
 объект JSON; команда сервера по-прежнему проходит window_rules при сборке; approved.json — нет: его одобрение
-по хешу пустило бы вне песочницы скрипт, который пишет сама роль, а текста скрипта владелец не видит) и
+по хешу пустило бы вне песочницы скрипт, который пишет сама роль, а текста скрипта владелец не видит),
+packs/<направление>/hooks/hooks.json — только сужение (metis-1435, pack_hooks_narrow, и в propose, и в проходе):
+убрать событие, группу, хук или флаг --always в command; добавить хук, сменить matcher, timeout, onFailure, порядок
+или другие слова команды — отказ; и
 ~/.claude/agents/_parts/<имя>.part — только уже существующие. ~/.claude/settings.json — только список
 autoMode.environment (metis-1135, [auto-1135-consent] «А+Б везде»: строка окнам, запущенным владельцем руками): весь
 прочий JSON — тот же по смыслу, список — строки (settings_env_only, и в propose, и в проходе); остальное в settings.json —
@@ -66,6 +69,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import string
 import subprocess
@@ -83,7 +87,9 @@ def set_core(mod):
 
 
 SETTINGS_REL = ".claude/settings.json"   # только autoMode.environment (settings_env_only, metis-1135)
-FILES = re.compile(r"\.claude/settings\.json|\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/mcp\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
+PACK_HOOKS = re.compile(r"\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/hooks/hooks\.json")   # только сужение (metis-1435)
+ALWAYS = re.compile(r" --always(?= )")   # флаг in_repo.py: хук идёт и в окнах с cwd вне репозитория
+FILES = re.compile(r"\.claude/settings\.json|\.claude/pantheon/(?:policy|grants)\.toml|\.claude/pantheon/packs/[a-z0-9][a-z0-9-]{0,40}/(?:mcp|hooks/hooks)\.json|\.claude/agents/_parts/[a-z0-9][a-z0-9_-]{0,60}\.part")
 REQ_TTL = 24 * 3600       # заявка старше суток — снята: владелец не ответил
 RETRY_SEC = 600           # окно Touch ID закрыто без ответа — следующее не раньше
 PRESENT_SEC = 300         # владелец у Mac: простой меньше 5 минут
@@ -140,7 +146,7 @@ def rel_of(arg):
 def target(rel):
     """Абсолютный путь файла: только из FILES, без ссылок на пути (папки — настоящие, внутри HOME)."""
     if not FILES.fullmatch(rel or ""):
-        raise Refuse(f"{rel}: не из списка файлов владельца (settings.json — autoMode.environment, policy.toml, grants.toml, packs/<направление>/mcp.json, ~/.claude/agents/_parts/*.part)")
+        raise Refuse(f"{rel}: не из списка файлов владельца (settings.json — autoMode.environment, policy.toml, grants.toml, packs/<направление>/mcp.json и hooks/hooks.json, ~/.claude/agents/_parts/*.part)")
     home = os.path.realpath(P.HOME)
     p = os.path.join(home, rel)
     if os.path.realpath(os.path.dirname(p)) != os.path.dirname(p):
@@ -198,6 +204,71 @@ def settings_env_only(old, new):
     if json.dumps(rest(a), sort_keys=True) != json.dumps(rest(b), sort_keys=True):   # true ≠ 1 (проверка безопасности)
         raise Refuse(f"~/{SETTINGS_REL}: меняется не только autoMode.environment — права, хуки и прочие ключи "
                      "этой заявкой не правятся")
+
+
+def _subseq(old, new, same):
+    """new — подсеквенция old (порядок тот же, без повторов) по сравнению same(o, n). Жадно: раннее совпадение
+    оставляет больше места остальным."""
+    it = iter(old)
+    return all(any(same(o, n) for o in it) for n in new)
+
+
+def _jeq(a, b):
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)   # true ≠ 1
+
+
+def _hook_narrow(o, n):
+    """Хук n — хук o или o без флага --always в command; прочие поля (type, timeout, onFailure…) — те же."""
+    if not isinstance(o, dict) or not isinstance(n, dict) or set(o) != set(n):
+        return False
+    if not _jeq({k: v for k, v in o.items() if k != "command"}, {k: v for k, v in n.items() if k != "command"}):
+        return False
+    oc, nc = o.get("command"), n.get("command")
+    if oc == nc:
+        return True
+    if not isinstance(oc, str) or not isinstance(nc, str) or ALWAYS.sub("", oc) != nc:
+        return False
+    try:   # снятый --always — слово до «--» обёртки, а не кусок пути в кавычках или аргумент скрипта
+        oa, na = shlex.split(oc), shlex.split(nc)
+    except ValueError:
+        return False
+    cut = oa.index("--") if "--" in oa else len(oa)
+    return na == [w for w in oa[:cut] if w != "--always"] + oa[cut:]
+
+
+def _group_narrow(o, n):
+    """Группа n — группа o с частью её хуков: matcher и прочие поля те же, хуки — подсеквенция."""
+    if not isinstance(o, dict) or not isinstance(n, dict) or set(o) != set(n) or "hooks" not in o:
+        return False
+    if not _jeq({k: v for k, v in o.items() if k != "hooks"}, {k: v for k, v in n.items() if k != "hooks"}):
+        return False
+    oh, nh = o["hooks"], n["hooks"]
+    return isinstance(oh, list) and isinstance(nh, list) and _subseq(oh, nh, _hook_narrow)
+
+
+def pack_hooks_narrow(rel, old, new):
+    """packs/<направление>/hooks/hooks.json (metis-1435): правка — только сужение. Новый JSON — старый без части
+    событий, групп или хуков, либо с хуком без флага --always в command (in_repo.py тогда пропускает окна с cwd вне
+    репозитория). Добавить хук, сменить matcher, timeout, onFailure, порядок или другие слова command — нельзя: иначе
+    Refuse. Новый хук в пакет — сборка окна и window_rules, не эта заявка."""
+    def bad_const(c):
+        raise ValueError(c)
+    try:
+        a, b = (json.loads(t, parse_constant=bad_const) for t in (old, new))
+    except ValueError:
+        raise Refuse(f"~/{rel}: не JSON") from None
+    ea = a.get("hooks") if isinstance(a, dict) else None
+    eb = b.get("hooks") if isinstance(b, dict) else None
+    if not isinstance(ea, dict) or not isinstance(eb, dict):
+        raise Refuse(f"~/{rel}: нет объекта hooks")
+    ok = set(a) == set(b) and _jeq({k: v for k, v in a.items() if k != "hooks"},
+                                   {k: v for k, v in b.items() if k != "hooks"})
+    for ev, groups in eb.items():
+        og = ea.get(ev)
+        ok = ok and isinstance(og, list) and isinstance(groups, list) and _subseq(og, groups, _group_narrow)
+    if not ok:
+        raise Refuse(f"~/{rel}: правка не сужение — можно только убрать хук или флаг --always в command; добавить хук, "
+                     "сменить matcher, timeout, onFailure или другие слова команды этой заявкой нельзя")
 
 
 def hidden_at(text, keep="\n\t"):
@@ -676,6 +747,8 @@ def facts(req):
         toml_keys(req["file"], old, req["new"], diff)   # и у заявки, положенной в очередь мимо propose (R2 Б1)
     if req["file"] == SETTINGS_REL:
         settings_env_only(old, req["new"])
+    if PACK_HOOKS.fullmatch(req["file"]):
+        pack_hooks_narrow(req["file"], old, req["new"])
     return cur
 
 
@@ -904,6 +977,8 @@ def _propose(rel, new, task, why, prog, cur=None):
             toml_keys(rel, old, new)
         if rel == SETTINGS_REL:
             settings_env_only(old, new)
+        if PACK_HOOKS.fullmatch(rel):
+            pack_hooks_narrow(rel, old, new)
     except Refuse as e:
         return err(f"{prog}: отказ — {e}")
     if old == new:
