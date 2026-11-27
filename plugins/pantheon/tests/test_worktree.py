@@ -584,7 +584,7 @@ grules = open(os.path.join(os.path.dirname(os.path.dirname(LIB)), "guard", "hook
 
 
 def consts(src):
-    return [re.sub(r"\s+", "", m) for m in re.findall(r"^(?:WIDEN_KEYS|SAFE_PERMISSIONS|SAFE_SANDBOX) = \([^)]*\)", src,
+    return [re.sub(r"\s+", "", m) for m in re.findall(r"^(?:SAFE_KEYS|SAFE_PERMISSIONS|SAFE_SANDBOX) = \([^)]*\)", src,
                                                        re.M)]
 
 

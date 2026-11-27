@@ -498,6 +498,40 @@ def test_window_text_author_and_budget():
           set(m.CORE_FILES) | set(m.BUILD_FILES) <= set(m.AREA_FILES) and set(m.CORE_DIR) <= dict(m.AREA_DIRS).keys())
 
 
+def test_light_unmarked_when_core_appears():
+    """metis-1302: в PR с отметкой light появились файлы ядра — отметка снимается; заявка снова обычная и по
+    REQUEST_TTL снимается тревогой «expired», а не повторяет nag вне ядра."""
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run(extra=AWAY)
+    check("вне ядра: отметка light стоит", b.req() is not None and b.req().get("light") is True, b.req())
+    b.view(SHA, files=["README.md", CORE_FILE])
+    b.run(t=T0 + 60, extra=AWAY)
+    check("в PR появилось ядро: отметка light снята", b.req() is not None and "light" not in b.req(), b.req())
+    b.run(t=T0 + 25 * 3600, extra=AWAY)
+    check("за сутки без ответа: заявка снята как expired, а не nag «вне ядра»", b.req() is None
+          and "expired" in b.log() and "nag" not in b.log(), str(b.outs[-1]) + str(b.log()))
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run(extra=AWAY)
+    b.view(SHA, files=["README.md", CORE_FILE])
+    b.run(t=T0 + 60, extra=AWAY)
+    b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")
+    b.run(t=T0 + 120, extra=AWAY)
+    check("PR с ядром слит мимо окна: заявка снята, merged-outside в журнале нет", b.req() is None
+          and "merged-outside" not in b.log(), str(b.outs[-1]) + str(b.log()))
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.run(extra=AWAY)
+    b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")   # ядро появилось и слито до следующего прохода
+    b.run(t=T0 + 60, extra=AWAY)
+    check("ядро появилось и PR слит между проходами: по свежим файлам не тихо «вне ядра»", b.req() is None
+          and "merged-outside" not in b.log() and "заявка снята" in b.alerts(), b.outs[-1] + b.alerts())
+
+
 def test_light_no_window():
     """metis-1280 (слово владельца 20.11 «PR вне ядра — без вашего пальца»): заявка на PR agent-kit вне ядра
     ставится с подсказкой «сливает координатор», окна на неё нет; список файлов не получен — окно, как раньше;

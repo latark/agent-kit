@@ -3521,12 +3521,45 @@ def _merge_repo_set():
             for r in v if isinstance(r, str) and r.strip()}
 
 
-def window_push_judged(texts, cwd):
+_PUSH_CFG_ENV = re.compile(r"\bGIT_CONFIG_(?:COUNT|KEY_|VALUE_|PARAMETERS)")  # настройки git из окружения
+
+
+def _git_cfg_moves_remote(texts):
+    """`git -c url.…`, `-c remote.…`, `-c branch.…` (и --config-env) до подкоманды: адрес remote меняется настройкой,
+    которой get-url в _git_out не видит (metis-1040, Д2 argus #412)."""
+    i = 0
+    while i < len(texts):
+        a = texts[i]
+        if a is None:
+            return False
+        if a in ("-c", "--config-env"):
+            kv = texts[i + 1] if i + 1 < len(texts) else None
+            i += 2
+        elif a.startswith("--config-env="):
+            kv, i = a.split("=", 1)[1], i + 1
+        elif a in _GIT_OPT_ARG:
+            i += 2
+            continue
+        elif a.startswith("-"):
+            i += 1
+            continue
+        else:
+            return False
+        if kv is None or kv.split("=", 1)[0].lower().startswith(("url.", "remote.", "branch.")):
+            return True
+    return False
+
+
+def window_push_judged(texts, cwd, moved=False, cmd=""):
     """git push главной сессии окна судит push_problem (metis-0983): True — репозиторий remote из [merge_repos] или
     его не вычислить; False — не push или репозиторий вне [merge_repos] (~/ai/pantheon и прочие хранилища окна: их
     main шлюз не сливает, отправка туда — законный путь). Слово до подкоманды не вычислить (`git -C "$d" …`): судится,
     только если среди слов есть push, — `git -C "$d" status` окно проходит, как до metis-0983 (Б1 argus #380).
-    URL — для push (`get-url --push`): remote.X.pushurl в [merge_repos] из-под суда не выводит (Д2 argus #380)."""
+    URL — для push (`get-url --push --all`): remote.X.pushurl в [merge_repos] из-под суда не выводит (Д2 argus #380),
+    у remote с несколькими адресами git пушит во все — судится, если хоть один из [merge_repos] (metis-1040, Д3).
+    Не вычислить, куда push, и потому судить (metis-1040): в команде есть cd (moved), а папка не названа абсолютным
+    `git -C` — remote считался бы по папке до cd (Д1); адрес меняет `-c url.*|remote.*|branch.*` или GIT_CONFIG_*
+    в тексте команды (cmd) — get-url их не видит (Д2)."""
     parsed = _git_sub(texts)
     if parsed is None:
         return "push" in texts
@@ -3534,6 +3567,10 @@ def window_push_judged(texts, cwd):
     if sub != "push":
         return False
     if any(a is None for a in args):
+        return True
+    if moved and not (gdir and os.path.isabs(os.path.expanduser(gdir.replace("${HOME}", HOME).replace("$HOME", HOME)))):
+        return True
+    if _git_cfg_moves_remote(texts) or _PUSH_CFG_ENV.search(cmd or ""):
         return True
     remote, i = None, 0
     while i < len(args):
@@ -3549,9 +3586,11 @@ def window_push_judged(texts, cwd):
     if not remote:
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
         remote = up.split("/", 1)[0] if "/" in up else "origin"
-    url = remote if re.search(r"[/:]", remote) else (_git_out(d, "remote", "get-url", "--push", remote) or "")
-    repo = _mg()._repo_tail(_mg()._remote_id(url)) if url.strip() else ""
-    return not repo or repo in _merge_repo_set()
+    urls = [remote] if re.search(r"[/:]", remote) else \
+        (_git_out(d, "remote", "get-url", "--push", "--all", remote) or "").splitlines()
+    repos = [_mg()._repo_tail(_mg()._remote_id(u)) if u.strip() else "" for u in urls]
+    merge = _merge_repo_set()
+    return not repos or any(not r or r in merge for r in repos)
 
 
 def push_problem(texts, cwd, moved):
@@ -3824,12 +3863,15 @@ def check_owner_merge(event, tool_input):
             # и push — как у ролей, в репозиториях [merge_repos]: main сливает шлюз (metis-0983, Д2 argus #378). Окно
             # hestia — своё правило (check_hestia: push_problem по consent, --force-with-lease своей ветки можно)
             win = window_role()
-            why = (push_problem(texts, cwd, moved) if win and win != "hestia" and window_push_judged(texts, cwd)
-                   else None)
+            why = (push_problem(texts, cwd, moved) if win and win != "hestia"
+                   and window_push_judged(texts, cwd, moved, cmd) else None)
             if why:
+                # с cd в команде remote судится как репозиторий шлюза: папку до cd не знать (metis-1040, Д1)
+                hint = (" В команде есть cd — куда уйдёт push, не вычислить: назови папку через git -C <полный путь> "
+                        "без cd." if moved else "")
                 return (f"Правило push: {why}. Окно отправляет только рабочие ветки (`pantheon git push origin "
                         "HEAD:<ветка>`); main и master сливает шлюз (gh pr merge), принудительная отправка и "
-                        "удаление веток — только владелец.")
+                        f"удаление веток — только владелец.{hint}")
             why = push_accepted(texts, cwd, moved)
             if why:
                 return why
@@ -5232,9 +5274,13 @@ def check_pr_cmd(event, tool, tool_input):
 # старте (allow_gate в pantheon.py); в другом репозитории своего направления такие ключи расширили бы окно молча —
 # отказ, и с path, и с name (новая worktree в репозитории cwd). Вне окна направления правило молчит.
 WORKTREES_DIR = ".claude/worktrees/"
-# ключи настроек проекта, которые расширяют окно: truthy значение — отказ. permissions и sandbox — по вложенным ключам
-WIDEN_KEYS = ("hooks", "env", "enabledPlugins", "enabledMcpjsonServers", "enableAllProjectMcpServers", "apiKeyHelper",
-              "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper")
+# ключи настроек проекта, которые окно не расширяют (metis-0915, Д :143 и Д1 argus #360): список разрешённых, а не
+# запретных — новый ключ Claude Code (disableAllHooks, subagentStatusLine, fileSuggestion, gcpAuthRefresh запускают
+# команды или снимают хуки) по умолчанию отказ. Прочий ключ с truthy значением — отказ. permissions и sandbox — по
+# вложенным ключам
+SAFE_KEYS = ("$schema", "model", "includeCoAuthoredBy", "attribution", "cleanupPeriodDays", "outputStyle", "language",
+             "alwaysThinkingEnabled", "spinnerTipsEnabled", "companyAnnouncements", "respectGitignore",
+             "prefersReducedMotion", "showTurnDuration")
 SAFE_PERMISSIONS = ("deny", "ask")
 SAFE_SANDBOX = ("autoAllowBashIfSandboxed", "failIfUnavailable", "enabled")
 
@@ -5275,7 +5321,7 @@ def _launch(folders):
 
 
 def _widening(dirs):
-    """[(файл, ключ)] — ключи .claude/settings*.json папок dirs, расширяющие окно (WIDEN_KEYS, permissions кроме deny
+    """[(файл, ключ)] — ключи .claude/settings*.json папок dirs, расширяющие окно (всё вне SAFE_KEYS, permissions кроме deny
     и ask, sandbox кроме безопасных и enabled: false). Нечитаемый файл — сам по себе ключ «?»: Claude Code его прочтёт."""
     found = []
     for d in dirs:
@@ -5291,7 +5337,7 @@ def _widening(dirs):
                 continue
             if not isinstance(data, dict):
                 continue
-            keys = [k for k in WIDEN_KEYS if data.get(k)]
+            keys = [k for k, v in data.items() if v and k not in SAFE_KEYS and k not in ("permissions", "sandbox")]
             for top, safe in (("permissions", SAFE_PERMISSIONS), ("sandbox", SAFE_SANDBOX)):
                 sub = data.get(top)
                 if isinstance(sub, dict):
@@ -5319,13 +5365,29 @@ def _same_as_launch(f, launch):
 
 def _widen_msg(repo, found):
     shown = "; ".join(f"{f}: {', '.join(k for g, k in found if g == f)}" for f in dict.fromkeys(f for f, _ in found))
-    return (f"Правило worktree-own: EnterWorktree в {repo} загрузил бы в окно настройки проекта ({shown}) — это не папка "
-            "запуска, и права окна выросли бы молча (metis-0911). Работай в репозитории без worktree или верни в отчёт: "
-            "ключи убирает или принимает владелец, из окна его не спрашивай.")
+    return (f"Правило worktree-own: копия {repo} (EnterWorktree, Agent с isolation или cwd) загрузила бы в окно "
+            f"настройки проекта ({shown}) — это не папка запуска, и права окна выросли бы молча (metis-0911). Работай в "
+            "репозитории без worktree; тесты коммита — `pantheon outside test --sha <коммит>` из папки репозитория, без "
+            "копии (metis-0915). Иначе верни в отчёт: ключи убирает или принимает владелец, из окна его не спрашивай.")
+
+
+def _cwd_widening(cwd, doms, win, launch):
+    """(репозиторий, [(файл, ключ)]) — настройки, которые Claude Code загрузил бы с новой копией репозитория папки cwd
+    своего направления. Репозиторий worktree папки запуска сверяется с папкой запуска, как у path: файлы байт в байт
+    как у неё окно уже приняло (metis-0915, Д :233 argus #360), иначе их ключи (хуки, env в git) — ложный отказ."""
+    folder, owner = _owner(cwd, doms)
+    root = _git_root(cwd, folder) if owner == win else None
+    if not root:
+        return None, []
+    found = _widening([root])
+    if _key(_wt_repo(root)[0] or root) == _key(launch):
+        found = [x for x in found if not _same_as_launch(x[0], launch)]
+    return root, found
 
 
 def check_worktree_own(event, tool, tool_input):
-    if tool != "EnterWorktree":
+    agent = tool in AGENT_TOOLS
+    if tool != "EnterWorktree" and not agent:
         return None
     raw = tool_input.get("path")
     win = os.environ.get("PANTHEON_WINDOW") or ""
@@ -5334,12 +5396,19 @@ def check_worktree_own(event, tool, tool_input):
         return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     launch = _launch(doms[win])
+    if agent:
+        # Agent с isolation: worktree (или cwd) — копия репозитория папки сессии, как EnterWorktree с name: её настройки
+        # проекта не папки запуска расширили бы окно так же (metis-0915, Д3 argus 2 #360). Agent без них — молчит
+        sub = tool_input.get("cwd")
+        at = _expand(sub, cwd) if isinstance(sub, str) and sub else cwd
+        if tool_input.get("isolation") != "worktree" and at == cwd:
+            return None
+        repo, found = _cwd_widening(at, doms, win, launch)
+        return _widen_msg(repo, found) if found else None
     if not isinstance(raw, str) or not raw:
         # name — новая worktree самим Claude Code, мимо проверок `pantheon worktree add`: окну направления закрыто
         # (решение владельца 15.11, вариант А metis-1225; П9b в pantheon.py снимает deny только ради path)
-        folder, owner = _owner(cwd, doms)
-        repo = _git_root(cwd, folder) if owner == win else None
-        found = _widening([repo]) if repo and _key(repo) != _key(launch) else []
+        repo, found = _cwd_widening(cwd, doms, win, launch)
         if found:
             return _widen_msg(repo, found)
         return ("Правило worktree-own: EnterWorktree с name окну направления закрыт (metis-1225, решение владельца "
@@ -5454,6 +5523,29 @@ def hard(check, *args):
                           "проще.", logged=True) from e
 
 
+def _post_bash(event):
+    """PostToolUse Bash хука плагина: журнал шлюза слияния, затем роли проекта после хода (metis-0883) — файл
+    .claude/agents своей папки, изменённый командой мимо Write/Edit, судит тот же _text_risk; находка — decision
+    block с причиной агенту. Сбой этой проверки — в журнал сбоев: команда уже выполнена, ход не ломаем."""
+    if "push" not in OFF:
+        try:
+            _mg().record(event)
+        except Exception as e:
+            log_failure("record", e)
+            raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
+                              "выполнена, но её запись (тесты или вердикт) шлюз слияния не увидит. Повтори команду или "
+                              "сообщи координатору.", logged=True) from e
+    if "protect-config" not in OFF:
+        try:
+            found = protect_config.agents_after(event)
+        except Exception as e:
+            log_failure("agents_after", e)
+            found = None
+        if found:
+            print(json.dumps({"decision": "block", "reason": protect_config.agents_after_reason(found)},
+                             ensure_ascii=False))
+
+
 def main(raw=None):
     """raw — байты события, уже прочитанные входом guard.py; None — прочитать stdin."""
     global EVENT_NAME
@@ -5476,17 +5568,12 @@ def main(raw=None):
         # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего.
         # Сбой записи — код 2: команда уже выполнена, Claude Code только показывает причину агенту (metis-0094)
         # merge_gate.record судит только Bash: остальные инструменты — без загрузки merge_gate.py (metis-0330)
-        if MODE == "plugin" and "push" not in OFF and event.get("tool_name") == "Bash":
-            try:
-                _mg().record(event)
-            except Exception as e:
-                log_failure("record", e)
-                raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
-                                  "выполнена, но её запись (тесты или вердикт) шлюз слияния не увидит. Повтори команду или "
-                                  "сообщи координатору.", logged=True) from e
+        if MODE == "plugin" and event.get("tool_name") == "Bash":
+            _post_bash(event)
         return
     tool = event.get("tool_name") if name == "PreToolUse" else None
-    if MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and managed_guard_active():
+    if (MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and os.environ.get("GUARD_BRANCH") != "1"
+            and managed_guard_active()):  # GUARD_BRANCH=1 — проба guard ветки (metis-1227), см. guard.quiet
         # ту же проверку уже делает хук из управляемых настроек; Agent, Task и Skill они guard не передают
         # (matcher Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch) — их проверяет плагин
         return
