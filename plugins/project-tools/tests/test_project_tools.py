@@ -495,6 +495,34 @@ skipped = project(home, "refused", {"pyproject.toml": PYPROJECT, ".claude/settin
                                     json.dumps({"enabledPlugins": {"sentry@claude-plugins-official": False}})})
 check("плагин, выключенный в проекте, не в списке «нет инструмента»", "sentry" not in missing_of(skipped)[1])
 
+# 9b. modern-web-guidance (metis-1356): только расширение Chrome; маркетплейс и env — в общие настройки проекта
+ext = project(home, "extproj", {"extension/manifest.json": {"manifest_version": 3, "name": "x"}})
+r, miss = missing_of(ext)
+check("расширение Chrome (manifest_version) → modern-web-guidance", miss.get("modern-web-guidance") == "Расширение Chrome", r.stdout)
+pwa = project(home, "pwa", {"package.json": pkg(next="^16.0.0"), "public/manifest.json": {"name": "pwa", "display": "standalone"}})
+check("манифест PWA и Next.js без manifest_version: modern-web-guidance не нужен",
+      "modern-web-guidance" not in missing_of(pwa)[1])
+r = run(home, "check", "--dir", ext, "--no-net")
+check("check расширения: «modern-web-guidance» в выводе, код 3", r.returncode == 3 and "modern-web-guidance" in r.stdout, r.stdout)
+run(home, "apply", "--dir", ext)
+sh = load(os.path.join(ext, ".claude", "settings.json"))
+check("apply: плагин, маркетплейс googlechrome и DISABLE_TELEMETRY=1 в settings.json",
+      sh["enabledPlugins"].get("modern-web-guidance@googlechrome") is True
+      and sh["extraKnownMarketplaces"]["googlechrome"]["source"] == {"source": "github", "repo": "GoogleChrome/modern-web-guidance"}
+      and sh["env"] == {"DISABLE_TELEMETRY": "1"}, json.dumps(sh))
+check("повтор apply: ничего нового", missing_of(ext)[1] == {} and run(home, "check", "--dir", ext, "--no-net").returncode == 0)
+envconf = project(home, "extenv", {"extension/manifest.json": {"manifest_version": 3},
+                                   ".claude/settings.json": {"env": {"DISABLE_TELEMETRY": "0", "A": "b"}}})
+run(home, "apply", "--dir", envconf)
+sh = load(os.path.join(envconf, ".claude", "settings.json"))
+check("чужое значение env не меняется, чужие ключи целы, маркетплейс добавлен",
+      sh["env"] == {"DISABLE_TELEMETRY": "0", "A": "b"} and "googlechrome" in sh["extraKnownMarketplaces"], json.dumps(sh))
+off = project(home, "extoff", {"extension/manifest.json": {"manifest_version": 3}, ".claude/settings.json":
+                               {"enabledPlugins": {"modern-web-guidance@googlechrome": False}}})
+run(home, "apply", "--dir", off)
+check("плагин выключен в проекте: ни маркетплейса, ни env не пишем",
+      "extraKnownMarketplaces" not in load(os.path.join(off, ".claude", "settings.json")))
+
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
       all(t in MAP["tools"] for st in MAP["stacks"] for t in st["tools"]))
