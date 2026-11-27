@@ -11,12 +11,12 @@ argus», файла заявки нет; те же «принять» с «да�
 """
 # ruff: noqa: F403, F405
 import os
-import shutil
 import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _merge_common import *  # noqa: F403
+from _py311 import copy_plugin  # noqa: E402 — общий помощник (metis-1432)
 
 sys.path.insert(0, LIBDIR)
 import tasks as T  # noqa: E402 — хеш пункта, как его считает шлюз
@@ -31,18 +31,6 @@ CALL = "(P.review_criteria_gap(repo, pr, sha, view, criteria_api()) or merge_con
 
 
 
-def copy_plugin(src, dst):
-    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
-    связывала тест с bin/heavy, которого он не зовёт."""
-    os.makedirs(dst)
-    for n in sorted(os.listdir(src)):
-        if n in ("bin", "tests", "__pycache__", ".git"):
-            continue
-        s = os.path.join(src, n)
-        if os.path.isdir(s):
-            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
-        else:
-            shutil.copy2(s, os.path.join(dst, n))
 
 def box(criteria=None):
     """PR ядра с «Closes metis-0001» в теле, задача с неотмеченным пунктом; запись тестов и два «принять» Opus на head,

@@ -10,13 +10,13 @@
 """
 # ruff: noqa: F403, F405
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _merge_common import *  # noqa: F403
+from _py311 import copy_plugin  # noqa: E402 — общий помощник (metis-1432)
 
 LOOP = ("import sys; sys.path.insert(0, sys.argv[1]); import pantheon as p; "
         "print(' '.join(p.review_loop(float(sys.argv[2]))))")
@@ -26,18 +26,6 @@ LAST = 'last != "вернуть" or '
 
 
 
-def copy_plugin(src, dst):
-    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
-    связывала тест с bin/heavy, которого он не зовёт."""
-    os.makedirs(dst)
-    for n in sorted(os.listdir(src)):
-        if n in ("bin", "tests", "__pycache__", ".git"):
-            continue
-        s = os.path.join(src, n)
-        if os.path.isdir(s):
-            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
-        else:
-            shutil.copy2(s, os.path.join(dst, n))
 
 def stamp(t):
     return datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds")

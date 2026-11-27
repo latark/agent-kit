@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311, mkroot  # CLI pantheon — только на Python 3.11+
+from _py311 import PY311, mkroot, copy_plugin  # CLI pantheon — только на Python 3.11+
 import atexit
 
 _ROOT = mkroot("tmp-jobdir-root-")
@@ -31,18 +31,6 @@ results = []
 
 
 
-def copy_plugin(src, dst):
-    """Копия плагина без bin/ и tests/ (metis-1431): папками верхнего уровня, а не copytree корня, чтобы карта не
-    связывала тест с bin/heavy, которого он не зовёт."""
-    os.makedirs(dst)
-    for n in sorted(os.listdir(src)):
-        if n in ("bin", "tests", "__pycache__", ".git"):
-            continue
-        s = os.path.join(src, n)
-        if os.path.isdir(s):
-            shutil.copytree(s, os.path.join(dst, n), ignore=shutil.ignore_patterns("__pycache__", "tests", ".git"))
-        else:
-            shutil.copy2(s, os.path.join(dst, n))
 
 def check(name, ok):
     results.append(bool(ok))
