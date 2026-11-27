@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Дежурный, часть 5: пересмотры, правила Аргуса, безопасность worktree, уборка песочницы (общая часть — _watch_common.py)."""
 # ruff: noqa: F403, F405
+import contextlib
 import os
+import stat
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _watch_common import *  # noqa: F403
