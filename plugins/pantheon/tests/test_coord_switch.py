@@ -11,6 +11,7 @@ claude подменён скриптом в PATH, как в test_start.py: `clau
 вызовы пишет в FAKE_LOG (argv и папку запуска).
 """
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -267,8 +268,14 @@ def cli_tests():
     b = bg()
     lr = json.load(open(lrun)) if os.path.exists(lrun) else {}
     win = json.load(open(os.path.join(state, "settings", "hermes-site.json")))
+    # metis-1337: отпечаток сборки окна — тот же, что у окна координатора: считается по settings/<окно>.json
+    # (исключения песочницы, запреты, autoMode), а не по тому, кто поднят. Формула — независимо от pantheon.py.
+    fp_part = {"excluded": (win.get("sandbox") or {}).get("excludedCommands"),
+               "deny": (win.get("permissions") or {}).get("deny"), "autoMode": win.get("autoMode")}
+    win_fp = hashlib.sha256(json.dumps(fp_part, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
     coord_like = dict(win, env=dict(win.get("env") or {}, PANTHEON_ORIGIN="zeus", PANTHEON_SESSION="hephaestus-site",
-                                    PANTHEON_ROLE="domain-coordinator", PANTHEON_WINDOW="hermes-site"))
+                                    PANTHEON_ROLE="domain-coordinator", PANTHEON_WINDOW="hermes-site",
+                                    PANTHEON_BUILD=win_fp))
     check("wake --task из hq со словом: claude --bg --agent domain-coordinator --name hephaestus-site --settings окно "
           "запуска, папка — папка координатора, /goal по поручению с id задачи",
           r.returncode == 0 and len(b) == 1
