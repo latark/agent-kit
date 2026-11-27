@@ -1056,6 +1056,10 @@ put(os.path.join(ma, "tests", "test_rmtree.py"), HDR + "t = tempfile.mkdtemp()\n
 put(os.path.join(ma, "lib", "rel.txt"), "rel\n")
 put(os.path.join(ma, "tests", "test_dotcwd.py"), HDR + "subprocess.run(['/bin/sh', '-c', ':', '.'], cwd=tempfile.mkdtemp(), "
     "check=True)\nsubprocess.run(['/bin/sh', '-c', ':', 'rel.txt'], cwd=os.path.join(P, 'lib'), check=True)\n" + OK2)
+# metis-1390 Д2: cwd процесса не раскрыть (текущая папка удалена) — абсолютные аргументы всё равно пишутся, а не молчаливый return
+put(os.path.join(ma, "lib", "delcwd.txt"), "d\n")
+put(os.path.join(ma, "tests", "test_delcwd.py"), HDR + "t = tempfile.mkdtemp()\nos.chdir(t)\nos.rmdir(t)\n"
+    "subprocess.run(['/bin/sh', '-c', ':', os.path.join(P, 'lib', 'delcwd.txt')], cwd='/', check=True)\n" + OK2)
 # читает дерево: открывает 25 файлов из пяти папок (порог — 20 из 5), ничего из них не запуская; s.sh запускает — эта
 # связь остаётся. test_fewdirs — 20 файлов из четырёх папок, test_thin — 15 из пяти: обычные тесты, связи остаются
 READ_DIRS = ("docs/a", "docs/b", "docs/c", "docs/d", "docs/e")
@@ -1104,6 +1108,7 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/mods/d4/m43.py", {"alpha/test_loader.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/rel.txt", {"alpha/test_dotcwd.py"}),
+                   ("plugins/alpha/lib/delcwd.txt", {"alpha/test_delcwd.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
                    ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
@@ -1133,7 +1138,7 @@ check("affected-map: version 3, hashes — sha256 каждого файла те
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
     "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
-    "alpha/test_dotcwd.py", "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
+    "alpha/test_dotcwd.py", "alpha/test_delcwd.py", "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
       mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')
