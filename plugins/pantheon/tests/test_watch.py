@@ -615,6 +615,54 @@ def test_main_copy_fresh_lag_no_alert_1027():
     check(not alerts, f"отставание меньше суток: тревога: {alerts}")
 
 
+def test_main_copy_filter_config_no_merge_1027():
+    """metis-1027, блокер Б: в config копии filter.* (команда ушла бы вне песочницы) — тревога, merge не вызван."""
+    alerts, before, after, om = _main_copy_case(lambda g, root: g("config", "filter.x.clean", "cat"))
+    check([a[1] for a in alerts] == ["config"] and "filter.x.clean" in alerts[0][2],
+          f"filter в config: нет тревоги config: {alerts}")
+    check(before == after != om, "filter в config: merge вызван, копия сдвинута")
+
+
+def test_main_copy_commondir_filter_not_run_1027():
+    """metis-1027, блокер Б: .git/commondir ведёт в чужую папку, где config с filter.x.clean — фильтр не запущен
+    (файла-метки нет), merge не вызван, тревога. На откате status читает чужой config и сам запускает фильтр."""
+    import shlex
+    marks = []
+
+    def setup(g, root):
+        base = os.path.dirname(root)
+        mark, foreign = os.path.join(base, "filter-ran"), os.path.join(base, "foreign.git")
+        marks.append(mark)
+        open(os.path.join(root, ".gitattributes"), "w").write("* filter=x\n")
+        open(os.path.join(root, "f.txt"), "w").write("x\n")
+        g("add", ".gitattributes", "f.txt")
+        g("commit", "-q", "-m", "c1b")
+        g("checkout", "-q", "-b", "tmp")
+        g("commit", "-q", "--allow-empty", "-m", "c3")
+        g("update-ref", "refs/remotes/origin/main", "tmp")
+        g("checkout", "-q", "main")
+        g("branch", "-q", "-D", "tmp")
+        shutil.copytree(os.path.join(root, ".git"), foreign)
+        g("config", "-f", os.path.join(foreign, "config"), "filter.x.clean", f"touch {shlex.quote(mark)}; cat")
+        open(os.path.join(root, ".git", "commondir"), "w").write(foreign + "\n")
+        os.utime(os.path.join(root, "f.txt"), (1000000000, 1000000000))  # тот же размер, другое время: status пересчитает через фильтр
+    alerts, before, after, om = _main_copy_case(setup)
+    check(not os.path.exists(marks[0]), "commondir на чужую папку: фильтр из чужого config запущен")
+    check(before == after != om, "commondir на чужую папку: merge вызван, копия сдвинута")
+    check([a[1] for a in alerts] == ["gitdir"], f"commondir на чужую папку: нет тревоги gitdir: {alerts}")
+
+
+def test_main_copy_gitdir_link_alert_1027():
+    """metis-1027, блокер Б: .git основной копии — ссылка, а не каталог: тревога, git не запускаем, копию не сдвигаем."""
+    def link(g, root):
+        real = os.path.join(os.path.dirname(root), "real.git")
+        os.rename(os.path.join(root, ".git"), real)
+        os.symlink(real, os.path.join(root, ".git"))
+    alerts, before, after, om = _main_copy_case(link)
+    check([a[1] for a in alerts] == ["gitdir"], f".git-ссылка: нет тревоги gitdir: {alerts}")
+    check(before == after != om, ".git-ссылка: копия сдвинута")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)

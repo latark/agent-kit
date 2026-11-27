@@ -2029,28 +2029,42 @@ def main_copy(t):
     """Основная копия agent-kit (AI_HOME/agent-kit) не должна стоять без ветки или отставать от origin/main (metis-1027:
     неделя detached с 02.11). Без сети: берётся уже имеющийся origin/main. Чистое дерево на main — `merge --ff-only`
     сам; иначе (detached, другая ветка, грязно, ff не вышел) — тревога один раз на состояние и ничего не трогаем:
-    detached — сразу, отставание — когда старейший недостающий коммит старше MAIN_COPY_LAG."""
+    detached — сразу, отставание — когда старейший недостающий коммит старше MAIN_COPY_LAG.
+    Проход идёт вне песочницы, а копию может править окно роли: git — только с явными GIT_DIR, GIT_COMMON_DIR и
+    GIT_WORK_TREE (как у копий, _copy_state), .git — настоящий каталог без commondir, перед status и merge —
+    unsafe_config. Иначе — тревога, git дальше не запускаем: фильтр или хук из чужого config ушёл бы вне песочницы."""
     root = os.path.join(P.AI_HOME, "agent-kit")
-    if not os.path.exists(os.path.join(root, ".git")):
+    gd = os.path.join(root, ".git")
+    if not os.path.lexists(gd):
         return
     short = root.replace(P.HOME, "~")
     key = "watch-main-copy"
-    head = _git("-C", root, "symbolic-ref", "-q", "--short", "HEAD")
+    if os.path.islink(gd) or not os.path.isdir(gd) or os.path.lexists(os.path.join(gd, "commondir")):
+        P.alert_once(key, "gitdir", f"основная копия {short}: .git не каталог репозитория (файл, ссылка или "
+                     "commondir) — Метиде: выяснить, кто подменил; дежурный git там не запускает", "watch")
+        return
+    env = {"GIT_DIR": gd, "GIT_COMMON_DIR": gd, "GIT_WORK_TREE": root}
+    head = _git("-C", root, "symbolic-ref", "-q", "--short", "HEAD", env=env)
     branch = head.stdout.strip() if head.returncode == 0 else ""
     if not branch:
         P.alert_once(key, "detached", f"основная копия {short} без ветки (detached HEAD) — Метиде: вернуть main и "
                      "сдвинуть до origin/main; сам дежурный её не трогает", "watch")
         return
-    if _git("-C", root, "rev-parse", "-q", "--verify", "origin/main^{commit}").returncode != 0:
+    if _git("-C", root, "rev-parse", "-q", "--verify", "origin/main^{commit}", env=env).returncode != 0:
         return
-    lag = _git("-C", root, "log", "--reverse", "--format=%ct", "HEAD..origin/main")
+    lag = _git("-C", root, "log", "--reverse", "--format=%ct", "HEAD..origin/main", env=env)
     stamps = lag.stdout.split() if lag.returncode == 0 else []
     if not stamps:
         P.clear_once(key)
         return
-    clean = _git("-C", root, "status", "--porcelain")
+    bad = unsafe_config(root, env)
+    if bad:
+        P.alert_once(key, "config", f"основная копия {short}: в конфигурации git {bad} — Метиде: убрать; дежурный "
+                     "status и merge там не запускает", "watch")
+        return
+    clean = _git("-C", root, "status", "--porcelain", env=env)
     if branch == "main" and clean.returncode == 0 and not clean.stdout.strip():
-        if _git("-C", root, "merge", "--ff-only", "origin/main").returncode == 0:
+        if _git("-C", root, "merge", "--ff-only", "origin/main", env=env).returncode == 0:
             P.clear_once(key)
             return
         why = "fast-forward не вышел (у main есть свои коммиты)"
