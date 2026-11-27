@@ -399,6 +399,8 @@ check("[1398] нет каталога → строка «нет каталога
       (out, w.tick_log()))
 check("[1398] нет каталога → тревога по NOCAT_KEY, карту не трогали", [a[0] for a in w.alerts] == [MT.NOCAT_KEY]
       and not w.heavy_calls and not w.origin_log()[0].startswith("карта:"), (w.alerts, w.heavy_calls))
+MT.tick(T + MT.CHECK_EVERY + 1)  # metis-1428: второй проход без каталога — строка в tick.log не добавляется
+check("[1428] два прохода без каталога — одна строка «нет каталога» в tick.log", w.tick_log().count("нет каталога") == 1, w.tick_log())
 OWN[0] = REPO
 
 # metis-1403: сетевой признак — по каждой ошибке, не по склейке

@@ -371,11 +371,16 @@ def tick(t):
         return None
     if not P.catalog_repo():  # metis-1398: без каталога agent-kit repos() пуст — не молчим, а пишем строку и тревогу
         st["checked"] = t
+        fresh = not st.get("nocat")  # metis-1428: строка в tick.log — при смене состояния, не на каждой проверке
+        st["nocat"] = True
         P.write_json(state_file(), st)
-        log(t, "нет каталога")
+        if fresh:
+            log(t, "нет каталога")
         P.alert_once(NOCAT_KEY, "нет каталога", "карта тестов: нет каталога agent-kit (known_marketplaces) — карта не обновляется", WHO)
         return "нет каталога"
     P.clear_once(NOCAT_KEY)
+    if st.pop("nocat", None):
+        P.write_json(state_file(), st)
     todo = repos()
     if not todo:
         return None
