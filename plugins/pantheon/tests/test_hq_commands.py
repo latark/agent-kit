@@ -318,6 +318,40 @@ else:
     sb_rows = suite("seatbelt", seatbelt_prefix(SB))
 
 
+# metis-1428: исключение внутри _suite — права каталогов под base всё равно возвращены (finally в suite)
+if os.geteuid() != 0:
+    class _Boom(Exception):
+        pass
+
+    def _boom(*_a, **_k):
+        raise _Boom("сбой в середине прогона")
+
+    def suite_no_finally(kind, prefix_of):  # мутант: suite без finally
+        return _suite(kind, prefix_of)
+
+    _run_real = run
+    run = _boom
+    try:
+        for _kind, _fn in (("exc-mutant", suite_no_finally), ("exc-real", suite)):
+            try:
+                _fn(_kind, lambda env, home, state: ())
+                _raised = False
+            except _Boom:
+                _raised = True
+            _left = readonly_dirs(os.path.join(_ROOT, _kind))
+            if _fn is suite:
+                check("[1428] исключение внутри _suite — права восстановлены (finally), read-only каталогов нет",
+                      _raised and _left == [], (_raised, _left))
+            else:
+                check("[1428] мутант убит: без finally после исключения каталоги остаются read-only",
+                      _raised and _left != [], (_raised, _left))
+                # после проверки мутанта вернуть права, чтобы проверка [1400] не видела 0o555
+                for _d in sorted(_left, key=lambda p: p.count(os.sep), reverse=True):
+                    os.chmod(_d, 0o755)
+    finally:
+        run = _run_real
+
+
 
 def run_main_permission():
     """metis-1013 (Д1, m13): run.main ловит PermissionError только в окне роли — одна строка и код 1; в терминале

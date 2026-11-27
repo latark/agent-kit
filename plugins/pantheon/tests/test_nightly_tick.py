@@ -402,6 +402,7 @@ check("[1398] нет каталога → строка «нет каталога
 check("[1398] нет каталога → тревога по NOCAT_KEY", [a[0] for a in w.alerts] == [NT.NOCAT_KEY] and not w.calls, (w.alerts, w.calls))
 NT.tick(T + CE + 1)
 check("[1398] повтор — то же значение тревоги (alert_once свернёт)", len(w.alerts) == 2 and w.alerts[0] == w.alerts[1], w.alerts)
+check("[1428] два прохода без каталога — одна строка «нет каталога» в tick.log", w.tick_log().count("нет каталога") == 1, w.tick_log())
 OWN[0] = REPO
 w.alerts.clear()
 NT.tick(T + 2 * CE + 2)
