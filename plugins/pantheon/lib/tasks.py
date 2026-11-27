@@ -1222,6 +1222,9 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
 # знает, что release и actual обязаны быть. Остальное считается здесь, по всем задачам, без участия ролей.
 
 CLOSED_BY_MERGE = "закрыта по слиянию"
+# metis-0827: поля release/actual ввёл проход автозакрытия (коммит 1f8bfe4a «metis-0308 п. 2a», 2026-10-20). Закрытые
+# раньше (closed < даты) их не имеют и иметь не будут: check не считает это ошибкой.
+RELEASE_FIELDS_FROM = "2026-10-20"
 NO_PR_HOURS = 24
 PR_REF_RE = re.compile(r"#\d{1,6}\b|/pull/\d{1,6}\b|\bPR\s*\d{1,6}\b")
 NO_PR = "review без PR"
@@ -1279,7 +1282,8 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
             errs.append((tid, "задача пачки без mode (self|single|parallel; «не решено» не годится) — поле нужно «Итогам пачек»"))
         if h.get("status") == "done" and not h.get("closed"):
             errs.append((tid, "status done без closed — дата закрытия берётся из updated"))
-        if h.get("status") == "done" and CLOSED_BY_MERGE in (b or ""):
+        if (h.get("status") == "done" and CLOSED_BY_MERGE in (b or "")
+                and not (h.get("closed") and str(h.get("closed")) < RELEASE_FIELDS_FROM)):
             for k in ("release", "actual"):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))

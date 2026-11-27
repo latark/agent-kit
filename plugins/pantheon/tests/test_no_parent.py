@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Задачи без пачки (metis-0940, слово владельца 06.11): (1) `pantheon task new` без --parent печатает подсказку
-batch-suggest; (2) `pantheon check` тревожит на открытую задачу без пачки старше суток (созданную с 2026-11-03);
+batch-suggest; (2) `pantheon check --quiet` пишет не больше одной строки «вне плана: N» в сутки (metis-1378): открытые
+задачи без пачки старше суток (созданные с 2026-11-03) и открытые пачки без раздела в плане направления;
 (3) плановый `pantheon batch-suggest run` сам прикрепляет «уверенные» предложения и пишет строку в журнал.
 Временные папки, настоящих задач и ~/ai/pantheon тест не трогает.
 
@@ -171,51 +172,57 @@ def part_attach_race():
 
 def part_check():
     tmp, home, state, env = make(stories=False)
-    put(home, "metis-9101", "Старая без пачки", "x", created="2026-11-05")           # тревога
+    put(home, "metis-9101", "Старая без пачки", "x", created="2026-11-05")           # в строке
     put(home, "metis-9102", "Свежая без пачки", "x", created="2026-11-07")           # моложе суток
     put(home, "metis-9103", "Хвост до плана 1.0", "x", created="2026-11-02")        # старый хвост
     put(home, "metis-9104", "Закрытая", "x", status="done", created="2026-11-05")
     put(home, "metis-9105", "Отброшенная", "x", status="dropped", created="2026-11-05")
     put(home, "metis-9106", "В пачке", "x", created="2026-11-05", parent="metis-9100")
-    put(home, "metis-9100", "Пачка", "x", typ="story", created="2026-11-05", mode=None)
-    put(home, "metis-9107", "Граница 03.11", "x", created="2026-11-03")              # тревога
+    put(home, "metis-9100", "Пачка: вне плана", "x", typ="story", created="2026-11-05", mode=None)
+    put(home, "metis-9107", "Граница 03.11", "x", created="2026-11-03")              # в строке
+    put(home, "metis-9121", "Пачка: в плане", "x", typ="story", created="2026-11-05", mode=None)
+    put(home, "metis-9122", "Пачка: закрытая вне плана", "x", typ="story", status="done", created="2026-11-05", mode=None)
+    with open(os.path.join(home, "directions", DIR, "plan-test.md"), "w", encoding="utf-8") as fh:
+        fh.write("# План\n\n## 1. Пачка А «в плане»\n\nstory: metis-9121\n\n| задача |\n|---|\n| 9106 |\n")
     r = pan(env, "check", "--quiet")
-    alerts = [ln for ln in r.stdout.splitlines() if "задачи без пачки" in ln]
+    alerts = [ln for ln in r.stdout.splitlines() if "вне плана:" in ln]
     line = alerts[0] if alerts else ""
-    check("check --quiet: одна тревога, в ней 9101 и 9107",
-          len(alerts) == 1 and "metis-9101" in line and "metis-9107" in line, r.stdout[-400:])
-    check("check --quiet: свежая, старый хвост, закрытые, в пачке и сама пачка не названы",
-          not any(x in line for x in ("9102", "9103", "9104", "9105", "9106", "9100")), line)
+    check("check --quiet: одна строка «вне плана: 3» — задачи 9101, 9107 и пачка 9100 вне плана",
+          len(alerts) == 1 and "вне плана: 3 " in line and all(f"metis-{n}" in line for n in ("9101", "9107", "9100")), r.stdout[-400:])
+    check("check --quiet: свежая, старый хвост, закрытые, задача в пачке, пачка из плана и закрытая пачка не названы",
+          not any(x in line for x in ("9102", "9103", "9104", "9105", "9106", "9121", "9122")), line)
+    check("check --quiet: прежней тревоги «задачи без пачки старше суток» нет", "задачи без пачки старше суток" not in r.stdout, r.stdout[-300:])
     r2 = pan(env, "check", "--quiet")
-    check("второй проход: тот же список не тревожит заново", "задачи без пачки" not in r2.stdout, r2.stdout[-300:])
+    check("второй проход в те же сутки: строки нет", "вне плана:" not in r2.stdout, r2.stdout[-300:])
     put(home, "metis-9108", "Ещё одна", "x", created="2026-11-04")
     r3 = pan(env, "check", "--quiet")
-    a3 = [ln for ln in r3.stdout.splitlines() if "задачи без пачки" in ln]
-    check("новая задача без пачки: тревога только про неё (один раз на id)",
-          len(a3) == 1 and "metis-9108" in a3[0] and "metis-9101" not in a3[0], r3.stdout[-300:])
+    check("новая задача без пачки в те же сутки: строки нет (раньше была тревога на каждый новый номер)",
+          "вне плана:" not in r3.stdout and "задачи без пачки" not in r3.stdout, r3.stdout[-300:])
+    nxt = dict(env, PANTHEON_NOW=str(int(NOW) + 90000))
+    r3n = pan(nxt, "check", "--quiet")
+    a3n = [ln for ln in r3n.stdout.splitlines() if "вне плана:" in ln]
+    # N считает и задачи, и пачки (задача 1378): 9101, 9102 (уже старше суток), 9107, 9108 и пачка 9100
+    check("через сутки: снова одна строка, уже с 9108 (N=5: четыре задачи и пачка 9100)",
+          len(a3n) == 1 and "вне плана: 5 " in a3n[0] and "metis-9108" in a3n[0] and "metis-9100" in a3n[0],
+          r3n.stdout[-300:])
     put(home, "metis-9109", "С полем batch", "x", created="2026-11-05", extra=["batch: ночь · 1"])
     put(home, "metis-9110", "Во входящих", "x", status="inbox", created="2026-11-05")
     put(home, "metis-9111", "Вопрос владельцу", "x", status="waiting", created="2026-11-05", extra=["waiting_on: human"])
     put(home, "metis-9112", "Ждёт другую задачу", "x", status="waiting", created="2026-11-05", extra=["waiting_on: metis-9101"])
-    r3b = pan(env, "check", "--quiet")
-    a3b = " ".join(ln for ln in r3b.stdout.splitlines() if "задачи без пачки" in ln)
+    nxt2 = dict(env, PANTHEON_NOW=str(int(NOW) + 2 * 90000))
+    r3b = pan(nxt2, "check", "--quiet")
+    a3b = " ".join(ln for ln in r3b.stdout.splitlines() if "вне плана:" in ln)
     check("check: поле batch, inbox и вопрос владельцу (waiting human) не названы; ждущая задачу — названа (Д3, С)",
           "9109" not in a3b and "9110" not in a3b and "9111" not in a3b and "metis-9112" in a3b, r3b.stdout[-300:])
-    seen_p = os.path.join(state, "no-parent-seen.json")
-    with open(seen_p, encoding="utf-8") as fh:
-        seen_now = fh.read()
-    os.rename(os.path.join(home, "directions", DIR, "tasks", "metis-9101.md"), os.path.join(tmp, "x.md"))
-    pan(env, "check", "--quiet")
-    with open(seen_p, encoding="utf-8") as fh:
-        seen_gone = fh.read()
-    os.rename(os.path.join(tmp, "x.md"), os.path.join(home, "directions", DIR, "tasks", "metis-9101.md"))
-    r3c = pan(env, "check", "--quiet")
-    check("check: ушедшая из списка задача забывается и при возвращении тревожит снова (Д3)",
-          "metis-9101" in seen_now and "metis-9101" not in seen_gone and "metis-9101" in r3c.stdout, (seen_now, seen_gone))
     r4 = pan(env, "check")
-    check("check руками: предупреждение со списком, код выхода не меняется (0)",
-          r4.returncode == 0 and "предупреждение · задачи без пачки старше суток" in r4.stdout and "metis-9101" in r4.stdout,
-          r4.stdout[-300:] + str(r4.returncode))
+    check("check руками: предупреждения со списками, код выхода не меняется (0)",
+          r4.returncode == 0 and "предупреждение · задачи без пачки старше суток" in r4.stdout and "metis-9101" in r4.stdout
+          and "предупреждение · пачки вне плана: metis-9100" in r4.stdout, r4.stdout[-300:] + str(r4.returncode))
+    shutil.rmtree(tmp, True)
+    tmp, home, state, env = make(stories=False)
+    put(home, "metis-9130", "Пачка: без плана направления", "x", typ="story", created="2026-11-05", mode=None)
+    r5 = pan(env, "check", "--quiet")
+    check("направление без плана: пачка не «вне плана» (сверять не с чем), строки нет", "вне плана:" not in r5.stdout, r5.stdout[-300:])
     shutil.rmtree(tmp, True)
 
 
@@ -224,16 +231,12 @@ def part_many():
     for i in range(15):
         put(home, f"metis-92{i:02d}", f"Задача {i}", "x", created="2026-11-05")
     r = pan(env, "check", "--quiet")
-    a = [ln for ln in r.stdout.splitlines() if "задачи без пачки" in ln]
-    check("тревога на 15 задач: названы первые 12, «и ещё 3» (Д7)",
-          len(a) == 1 and "metis-9211" in a[0] and "metis-9212" not in a[0] and "и ещё 3" in a[0], r.stdout[-300:])
+    a = [ln for ln in r.stdout.splitlines() if "вне плана:" in ln]
+    check("15 задач: одна строка «вне плана: 15», названы первые 12, «и ещё 3» (Д7)",
+          len(a) == 1 and "вне плана: 15 " in a[0] and "metis-9211" in a[0] and "metis-9212" not in a[0] and "и ещё 3" in a[0],
+          r.stdout[-300:])
     r2 = pan(env, "check", "--quiet")
-    a2 = [ln for ln in r2.stdout.splitlines() if "задачи без пачки" in ln]
-    check("скрытый хвост не считается виденным: следующий тик называет остальные три (Д7)",
-          len(a2) == 1 and all(x in a2[0] for x in ("metis-9212", "metis-9213", "metis-9214")) and "metis-9200" not in a2[0],
-          r2.stdout[-300:])
-    r3 = pan(env, "check", "--quiet")
-    check("потом тихо", "задачи без пачки" not in r3.stdout, r3.stdout[-200:])
+    check("в те же сутки тихо", "вне плана:" not in r2.stdout, r2.stdout[-200:])
     shutil.rmtree(tmp, True)
 
 

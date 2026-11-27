@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 NOW_MAX = 9000                       # знаков в разделе «Сейчас»
 STALE_HOURS = 24                     # «Обновлено» старше — тревога (журнала STATUS нет)
 NOW_BEHIND_HOURS = 6                 # «Обновлено» старше свежего журнала STATUS на столько — тревога (metis-1005)
+MANUAL_PAGES = ("backlog.md", "decision-map.md")  # ручные страницы без даты свежести (metis-0920)
+MANUAL_STALE_DAYS = 3                # страница без правки дольше — предупреждение check
 ARCHIVE_SECTIONS = ("Сейчас", "Сессии и хозяйство")  # где лежит журнал датированных блоков
 DEFAULT_DAYS = 7
 HEAD_RE = re.compile(r"^##[ \t]+(.*?)[ \t]*$")
@@ -23,6 +25,17 @@ UPD_RE = re.compile(r"Обновлено\s+(\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?:\s
 DATE_RU = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?![\d.])")
 RANGE_RU = re.compile(r"(?<![\d.])(\d{1,2})\s*[–-]\s*(\d{1,2})\.(\d{2})(?![\d.])")
 BLOCK_START = re.compile(r"^[-*][ \t]+(?:\*\*)?(?:(\d{4})-(\d{2})-(\d{2})|(\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?![\d.]))")
+
+
+def stale_pages(mtimes, t, days=MANUAL_STALE_DAYS):
+    """Ручные страницы без правки дольше days дней (metis-0920). mtimes: {имя файла: mtime или None}; нет файла (None) —
+    не в счёт. → [(имя, полных дней без правки)] по порядку MANUAL_PAGES."""
+    out = []
+    for name in MANUAL_PAGES:
+        m = mtimes.get(name)
+        if m is not None and t - m > days * 86400:
+            out.append((name, int((t - m) // 86400)))
+    return out
 
 
 def sections(text):
