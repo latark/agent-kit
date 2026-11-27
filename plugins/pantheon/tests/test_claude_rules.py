@@ -144,8 +144,8 @@ C.time.monotonic = lambda: 1000 if seen else 0   # не зависит ни от
 C.DEADLINE = 40
 C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
 C.DEADLINE, C.time.monotonic = None, mono
-check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found", errs == ["срок обхода истёк"]
-      and seen, (errs, seen))
+check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found",
+      errs[-1:] == ["срок обхода истёк"] and errs.count("срок обхода истёк") == 1 and seen, (errs, seen))   # порядок обхода — любой
 check("hot_dir: корень, первый уровень, корни вложенных копий и их первый уровень — .husky и папки шаблонов .claude",
       all(C.hot_dir(p) for p in ("app", ".claude", ".claude/skills/a/b", "app/.Claude/hooks", ".husky/x", ".claude/worktrees",
                                  ".claude/worktrees/y", ".claude/worktrees/y/sub", ".claude/worktrees/y/sub/.claude/hooks/x",
