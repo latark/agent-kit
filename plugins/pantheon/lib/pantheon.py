@@ -4525,6 +4525,12 @@ def window_excluded(name):
     return [x for p in WINDOW_EXCLUDED.get(name, ()) for x in (p, p + " *")]
 
 
+# env окна направления по имени окна — решение владельца 27.11 (metis-1355, вариант А): в окне plutus-finance лежат
+# банковские выписки, телеметрию Claude Code там выключаем. Только эта переменная и только это окно; таблица ядра,
+# пакет окна env не задаёт поверх неё (window_extra_apply не перезаписывает занятый ключ)
+WINDOW_ENV_CORE = {"plutus-finance": {"DISABLE_TELEMETRY": "1"}}
+
+
 def window_plugins_allowed(pmap, name):
     """Плагины, которые пакет может включить окну name: «оставить» его записи карты (своей или direction). Карты нет
     (не читается) — никакие: пакет не включает плагины мимо карты."""
@@ -4812,6 +4818,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             deny_list = data["permissions"].setdefault("deny", [])
             deny_list += [t for t in WORKTREE_TOOLS if t not in deny_list]
             data["sandbox"]["excludedCommands"] += window_excluded(name)
+            data["env"].update(WINDOW_ENV_CORE.get(name, {}))  # metis-1355
             # скрипты репозиториев, которые снимок пакета берёт при запуске окна (pack_hook_scripts): их .claude/hooks —
             # литералом в denyWrite. Глоб «/**/.claude/hooks» Claude Code закрывает только по регулярке, а литерал — и
             # переименование его предков (app, app/.claude; ревью argus E1 Б1): без этого окно подменило бы папку

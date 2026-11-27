@@ -111,7 +111,8 @@ def excluded_no_worktree_write(p, tmp):
           {tuple(x.split()[:3]) for x in p.GIT_OUT} == {("pantheon", "git", s) for s in GIT_OUT_ONLY}, p.GIT_OUT)
     folders = {}
     os.makedirs(p.PANTHEON, exist_ok=True)  # alerts.md: нет guard в временном HOME — тревога, сборка идёт дальше
-    for name, rel in (("alpha-test", "projects/app"), ("metis-pantheon", "projects/kit")):
+    for name, rel in (("alpha-test", "projects/app"), ("metis-pantheon", "projects/kit"),
+                      ("plutus-finance", "projects/fin")):
         os.makedirs(os.path.join(tmp, rel), exist_ok=True)
         folders[name] = [os.path.join(tmp, rel)]  # окну направления сетевой git — всегда, репозиторий не нужен
     # мастерской — только при SSH-remote; окно роли режет запись .git/config под ~ (временный HOME в кэше окна)
@@ -160,13 +161,14 @@ def excluded_no_worktree_write(p, tmp):
     check("_record_origins: сбой записи (любое исключение) — старый список окна удалён, сборка не падает, "
           "pinned_remote отказывает «не прочитан»", gone and "не прочитан" in refused, (gone, refused))
     out = p.path("settings")
-    windows, auto = {}, {}
+    windows, auto, envs = {}, {}, {}
     for f in sorted(os.listdir(out)):
         if f.endswith(".json"):
             with open(os.path.join(out, f), encoding="utf-8") as fh:
                 data = json.load(fh)
             windows[f[:-5]] = data["sandbox"]["excludedCommands"]
             auto[f[:-5]] = (data.get("autoMode") or {}).get("allow")
+            envs[f[:-5]] = data.get("env") or {}
     # metis-1135 п. 1 ([auto-1135-consent] «везде»): сборка окон кладёт сверку согласия и штабу, Гестии, мастерской
     check("sandbox_build: autoMode.allow окон hq, hestia и workshop — \"$defaults\" и Consent Check (metis-1135 п. 1)",
           all(auto.get(n) == ["$defaults", p.WINDOW_RULES.CONSENT_CHECK_RULE] for n in ("hq", "hestia", "workshop")),
@@ -174,6 +176,10 @@ def excluded_no_worktree_write(p, tmp):
     check("sandbox_build: у окон направлений Consent Check — последним правилом, как и было (metis-0161)",
           all((auto.get(n) or [None])[-1] == p.WINDOW_RULES.CONSENT_CHECK_RULE for n in ("alpha-test", "metis-pantheon")),
           {n: len(auto.get(n) or []) for n in ("alpha-test", "metis-pantheon")})
+    check("sandbox_build: env DISABLE_TELEMETRY=\"1\" — у окна plutus-finance, у остальных окон нет (metis-1355)",
+          envs.get("plutus-finance", {}).get("DISABLE_TELEMETRY") == "1"
+          and not any("DISABLE_TELEMETRY" in e for n, e in envs.items() if n != "plutus-finance") and len(envs) > 2,
+          {n: e.get("DISABLE_TELEMETRY") for n, e in envs.items()})
     need = {"alpha-test", "metis-pantheon", "workshop", "hestia", "hq"}
     check("sandbox_build: окна направлений, мастерской, Гестии и Пританея собраны", need <= set(windows),
           (built, sorted(windows)))
