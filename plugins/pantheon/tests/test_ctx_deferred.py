@@ -24,6 +24,9 @@ import threading
 import time
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import readonly_dirs, rmtree_force  # noqa: E402
+
 HOOK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "ctx.py")
 HOOKS_JSON = os.path.join(os.path.dirname(HOOK), "hooks.json")
 PY = os.environ.get("CTX_TEST_PYTHON") or sys.executable
@@ -611,6 +614,8 @@ ctx.prune_records()
 check("prune_records: старый файл без замка снят, хвостов .prune нет",
       not os.path.exists(pm) and not [x for x in os.listdir(CTXD) if x.endswith(".prune")], os.listdir(CTXD))
 
-shutil.rmtree(tmp, ignore_errors=True)
+check("[1400] после прогона в корне временных папок нет каталогов только для чтения (0o555)", not readonly_dirs(tmp),
+      readonly_dirs(tmp))
+rmtree_force(tmp)
 print("%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
