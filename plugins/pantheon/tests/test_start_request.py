@@ -428,6 +428,55 @@ try:
     os.environ["PANTHEON_ROLE"] = "domain-coordinator"
     rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001", "--from", "zeus"])
     check("1066 wake hestia --from zeus в окне не hq → код 2", rc == 2 and "--from zeus" in err, (rc, out, err))
+
+    # metis-1409: окно направления (metis-pantheon) не пишет STATE/hq-rw/locks — заявка в кэш окна, а не отказ замка
+    if os.geteuid() != 0:
+        wcache = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "metis-pantheon")
+        os.makedirs(os.path.join(wcache, "tmp"), exist_ok=True)
+        wreq_h = os.path.join(wcache, "start-req", "hestia.req")
+        locks = P.path(P.HQ_RW, "locks")
+        os.makedirs(locks, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(locks, "start-hestia.lock"))
+        os.environ["PANTHEON_TMP"] = os.path.join(wcache, "tmp")
+        os.chmod(locks, 0o555)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(P.path("owner-log", "zeus.md"))
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            check("1409 wake hestia из окна направления без вашего слова → код 2, заявки нет",
+                  rc == 2 and not os.path.exists(wreq_h), (rc, out, err))
+            word(60)
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            data = [json.loads(x) for x in open(wreq_h).read().splitlines()] if os.path.exists(wreq_h) else []
+            check("1409 wake hestia из окна направления, замок закрыт → код 0, заявка в кэше окна, by — имя окна",
+                  rc == 0 and "заявка принята" in out and "PermissionError" not in err and len(data) == 1
+                  and data[0] == {"target": "hestia", "time": data[0]["time"], "by": "metis-pantheon",
+                                  "task": "metis-0001"}, (rc, out, err, data))
+        finally:
+            os.chmod(locks, 0o755)
+            os.environ.pop("PANTHEON_TMP")
+        calls = []
+        G = P.take_start_requests.__globals__
+        real = G["_hestia_by_request"]
+        G["_hestia_by_request"] = lambda tid: calls.append(tid) or "поднята"
+        try:
+            got = dict(P.take_start_requests(doms, P.now()))
+            check("1409 проход: заявка Гестии из кэша окна → один вызов, файл снят",
+                  calls == ["metis-0001"] and got.get("hestia") == "поднята" and not os.path.exists(wreq_h),
+                  (calls, got))
+            for by, ago, why in (("zeus", 60, "by не имя окна"), ("metis-pantheon", 3 * 3600, "без вашего слова")):
+                word(ago)
+                with open(wreq_h, "w") as fh:
+                    fh.write(json.dumps({"target": "hestia", "time": P.stamp(P.now()), "by": by,
+                                         "task": "metis-0001"}) + "\n")
+                del calls[:]
+                a0 = len(alerts_text())
+                got = dict(P.take_start_requests(doms, P.now()))
+                check(f"1409 проход: заявка Гестии из кэша окна, {why} → отклонена с тревогой, файл снят",
+                      not calls and "отклонена" in alerts_text()[a0:] and not os.path.exists(wreq_h), (calls, got))
+        finally:
+            G["_hestia_by_request"] = real
     os.environ.pop("PANTHEON_ROLE")
     with contextlib.suppress(FileNotFoundError):
         os.unlink(P.path("owner-log", "zeus.md"))
