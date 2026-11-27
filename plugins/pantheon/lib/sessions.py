@@ -266,7 +266,8 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None, resume=None):
     if any(not x.get("id") for x in live):
         why = copies_message(name, live)
         P.start_log(f"fresh-tab\t{name}\t{origin}")
-        P.alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
+        # metis-1025: окно во вкладке терминала держится часами — повтор каждый проход (28 строк за 3 дня) → строка в сутки
+        P.alert_fold(f"fresh-tab-{name}", f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
     stopped = list(live)
     P.stop_copies(name, live, "stop-fresh")

@@ -867,6 +867,30 @@ def alert_daily(key, text, who="pantheon", window=ALERT_WINDOW):
     open(mark, "w").write(str(t))
 
 
+def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
+    """Одна причина — одна строка со счётчиком (metis-1025): первая тревога ключа пишется, повторы в течение window
+    секунд от неё только считаются (STATE/once), следующая строка после окна несёт «повторов ×N с <время>».
+    Для сбоев, которые плановый проход видит каждые 5 мин или час (уборка кэшей, очистка Зевса): 690 строк за 3 дня
+    одной причины → одна в сутки. Текст строки может меняться (числа), ключ — нет. True — строка записана."""
+    mark = once_path("fold-" + key)
+    t = now()
+    try:
+        with open(mark, encoding="utf-8") as fh:
+            st = json.load(fh)
+        last, n = float(st["t"]), int(st.get("n") or 0)
+    except (OSError, ValueError, TypeError, KeyError):
+        last, n = None, 0
+    os.makedirs(path("once"), exist_ok=True)
+    if last is not None and last <= t < last + window:  # замер из будущего (часы назад) окно не продлевает
+        write_atomic(mark, json.dumps({"t": last, "n": n + 1}))
+        return False
+    if last is not None and n > 0:
+        text = f"{text} (повторов ×{n} с {stamp(last)})"
+    alert(text, who)
+    write_atomic(mark, json.dumps({"t": t, "n": 0}))
+    return True
+
+
 def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
     """Тревога (и уведомление note — сбой класса «скоро», через политику уведомлений) один раз на значение value:
     повтор того же состояния молчит. group — вид уведомления: новое того же вида заменяет прежнее в Центре

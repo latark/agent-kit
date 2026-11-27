@@ -2361,9 +2361,12 @@ def sandbox_sweep(t):
     removed = 0
     if opened is not None:
         removed, failed = sandbox_clean(root, t, opened)
-        if removed or failed:
-            P.alert(f"кэши песочниц: убрано записей {removed}" + (f", не удалось {failed}" if failed else "")
-                    + f" (старше {SANDBOX_DAYS} дн., без процессов)", "watch")
+        msg = (f"кэши песочниц: убрано записей {removed}" + (f", не удалось {failed}" if failed else "")
+               + f" (старше {SANDBOX_DAYS} дн., без процессов)")
+        if removed:
+            P.alert(msg, "watch")
+        elif failed:  # metis-1025: те же неудаляемые записи каждые 5 мин (690 строк за 3 дня) — строка в сутки со счётчиком
+            P.alert_fold("sandbox-sweep-failed", msg, "watch")
     try:
         cap = int(os.environ.get("PANTHEON_SANDBOX_CAP_MB") or SANDBOX_CAP_MB)
     except ValueError:
@@ -2705,7 +2708,9 @@ def zeus_clean_failed(st, stp, t, a, n, rc, held):
         # start zeus» с причиной дал fresh_skip, если Зевс уже погашен, — не «не вышла, код 4» (metis-1192)
         return zeus_trace(st, stp, t, a, [(0, P.SKIP_WHY)], n, "отложено")
     zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
-    P.alert(f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log", "watch")
+    # metis-1025: повтор раз в час с той же причиной (28 строк за 3 дня) — строка в сутки со счётчиком
+    P.alert_fold("zeus-clean-failed", f"очистка Зевса не вышла, код {rc} — контекст {n // 1000} тыс.; журнал start.log",
+                 "watch")
 
 
 def _hq_copy(a):
