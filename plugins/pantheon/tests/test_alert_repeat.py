@@ -94,9 +94,9 @@ def streak_cases(P, out):
             "fatal: Authentication failed for 'https://github.com/x/y/'")
     out("net_error: отказ авторизации 403/401 — не сетевой, даже с «unable to access» (metis-1407)",
         not any(P.net_error(x) for x in auth), [x for x in auth if P.net_error(x)])
-    P.alert_net("auth", "fetch: " + auth[0], "выпуск без Actions: 403", "pantheon-tick")
+    P.alert_net("auth", "fetch: " + auth[0], "проба авторизации: 403", "pantheon-tick")
     out("alert_net: 403 — тревога с первого прохода, а не с третьего (metis-1407)",
-        len(lines(P, "выпуск без Actions: 403")) == 1, lines(P, "403"))
+        len(lines(P, "проба авторизации: 403")) == 1, lines(P, "проба авторизации"))
 
 
 def autoclose_cases(P, out):
