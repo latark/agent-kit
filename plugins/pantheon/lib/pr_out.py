@@ -31,6 +31,7 @@ gh, проверяет она сама (Д2 плана):
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
 """
 import fnmatch
+import json
 import os
 import re
 import subprocess
@@ -70,6 +71,7 @@ FORM = {
 SEL = re.compile(r"[1-9][0-9]{0,8}|[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,99})*")
 PROTECTED = {"main", "master"}
 BODY_MAX = 256 * 1024
+MANAGED_FILE = P.MANAGED  # управляемые настройки: правила Read(...) из permissions.deny; тест подменяет эту строку
 
 
 class PrRefuse(Exception):
@@ -167,19 +169,58 @@ def _personal():
     return any(_inside(x, folders, _key) for x in _private())
 
 
-def _read_closed(full):
-    """Закрыт ли путь окну на чтение: sandbox.filesystem.denyRead его сборки (STATE/settings/<окно>.json, metis-1348).
-    Запись — путь («~/…» раскрывается, хвост «/**» и «/*» снимается: закрыто поддерево), шаблон или имя без «/»
-    (.env, secrets — компонент любого пути). Шире, не уже: «*» у fnmatch переходит через «/»; регистр и Юникод — _key.
-    Окна или файла нет — закрытого нет."""
+def _json(path):
+    try:
+        with open(path, "rb") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _read_rule(spec, top):
+    """Правило Read(<spec>) из permissions.deny → записи в форме denyRead (metis-1348): «//x» — абсолютный путь, «~/x» —
+    домашняя, «/x» и «x/y», «./x/y» — от корня копии (для «/x» — и абсолютный: шире, не уже), без «/» — имя в любой
+    папке (gitignore). Хвост «/**», «/*» и ведущий «**/» снимаются: закрыто поддерево."""
+    spec = spec.strip()
+    while spec.endswith(("/**", "/*")):
+        spec = spec.rsplit("/", 1)[0]
+    while spec.startswith("**/"):
+        spec = spec[3:]
+    if not spec:
+        return []
+    if spec.startswith("//"):
+        return [spec[1:]]
+    if spec.startswith("~/") or spec == "~":
+        return [spec]
+    rel = spec[2:] if spec.startswith("./") else spec.lstrip("/")
+    if "/" not in rel and not spec.startswith("/"):
+        return [rel]  # .env, secrets, .env.*.local — компонент любого пути
+    return ([spec] if spec.startswith("/") else []) + ([top.rstrip("/") + "/" + rel] if top else [])
+
+
+def _read_closed(full, top=None):
+    """Закрыт ли путь окну на чтение (metis-1348): sandbox.filesystem.denyRead сборки окна (STATE/settings/<окно>.json) и
+    правила Read(...) из permissions.deny — и этого файла, и managed-settings (MANAGED_FILE). Запись — путь («~/…»
+    раскрывается, хвост «/**» и «/*» снимается: закрыто поддерево), шаблон или имя без «/» (.env, secrets — компонент
+    любого пути; относительные с «/» — от корня копии top, _read_rule). Шире, не уже: «*» у fnmatch переходит через «/»;
+    регистр и Юникод — _key. Файла нет или не разобрать — закрытого нет."""
     win = os.environ.get("PANTHEON_WINDOW") or ""
-    data = P.read_json(P.path("settings", win + ".json"), {}) if win else {}
-    fs = (data.get("sandbox") or {}).get("filesystem") if isinstance(data, dict) else None
-    items = fs.get("denyRead") if isinstance(fs, dict) else None
+    items = []
+    for data in (P.read_json(P.path("settings", win + ".json"), {}) if win else {}, _json(MANAGED_FILE)):
+        if not isinstance(data, dict):
+            continue
+        fs = (data.get("sandbox") or {}).get("filesystem")
+        got = fs.get("denyRead") if isinstance(fs, dict) else None
+        items += [x for x in got if isinstance(x, str)] if isinstance(got, list) else []
+        perm = data.get("permissions")
+        deny = perm.get("deny") if isinstance(perm, dict) else None
+        for r in deny if isinstance(deny, list) else []:
+            m = re.fullmatch(r"\s*Read\((.*)\)\s*", r, re.S) if isinstance(r, str) else None
+            items += _read_rule(m.group(1), top) if m else []
     parts = [c for c in full.split(os.sep) if c]
     ancestors = [os.sep + os.sep.join(parts[:i]) for i in range(1, len(parts) + 1)]
-    for x in items if isinstance(items, list) else []:
-        pat = x.strip() if isinstance(x, str) else ""
+    for x in items:
+        pat = x.strip()
         while pat.endswith(("/**", "/*")):
             pat = pat.rsplit("/", 1)[0]
         pat = P.HOME + pat[1:] if pat == "~" or pat.startswith("~/") else pat
@@ -203,7 +244,7 @@ def _body(f, cwd, top):
     full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f)))
     if _inside(full, _private(), _key) or any(_key(c) == ".git" for c in full.split(os.sep)):
         raise PrRefuse(f"--body-file {f}: личное ([private] policy.toml) и файлы из .git на GitHub не выносятся")
-    if _read_closed(full):
+    if _read_closed(full, top):
         raise PrRefuse(f"--body-file {f}: путь закрыт окну на чтение (denyRead сборки окна)")
     tmp = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""),) if p]
     if not _inside(full, tmp + [top]):

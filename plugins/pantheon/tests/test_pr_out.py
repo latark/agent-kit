@@ -272,6 +272,32 @@ try:
         check(f"--body-file вне denyRead окна ({win}) — код 0", r.returncode == 0, r.stderr)
     r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_WINDOW": "win-none"})
     check("окно без файла настроек: закрытого нет — код 0", r.returncode == 0, r.stderr)
+    # metis-1348: правило Read(.env*) из permissions.deny управляемых настроек (MANAGED_FILE) закрывает файл так же,
+    # как denyRead окна: без этого `pantheon pr comment -F .env.local` отправлял бы файл на GitHub
+    managed = os.path.join(W, "managed-settings.json")
+    json.dump({"permissions": {"deny": ["Read(.env*)", "Read(./secrets/**)", "Bash(rm:*)"]}}, open(managed, "w"))
+    man_old = "MANAGED_FILE = P.MANAGED"
+    man_rule = "            items += _read_rule(m.group(1), top) if m else []\n"
+    check("самопроверка: MANAGED_FILE и разбор Read(...) — по одной строке", src.count(man_old) == 1 and src.count(man_rule) == 1)
+
+    def managed_lib(name, rule_new=None):
+        """Копия lib, где управляемые настройки — managed-settings.json теста; rule_new — мутант разбора правил Read(...)."""
+        text = src.replace(man_old, f"MANAGED_FILE = {managed!r}")
+        d = os.path.join(W, name)
+        shutil.copytree(GHLIB, d, ignore=shutil.ignore_patterns("__pycache__"))
+        open(os.path.join(d, "pr_out.py"), "w", encoding="utf-8").write(text if rule_new is None else text.replace(man_rule, rule_new))
+        return d
+
+    mlib, mlib_mut = managed_lib("lib-managed"), managed_lib("lib-managed-mut", "            items += []\n")
+    open(os.path.join(repo, ".env.local"), "w").write("KEY=secret\n")
+    for flag in ("-F", "--body-file"):
+        r = cli("comment", "5", flag, ".env.local", lib=mlib)
+        check(f"managed deny Read(.env*): {flag} .env.local — отказ", refused(r) and "закрыт окну на чтение" in r.stderr, r.stderr)
+        r = cli("comment", "5", flag, ".env.local", lib=mlib_mut)
+        check(f"мутант убит: {flag} .env.local без разбора Read(...) доходит до gh", gh_args() is not None, r.stderr)
+    r = cli("comment", "5", "-F", "body.md", lib=mlib)
+    check("managed deny Read(.env*): обычный файл копии — код 0", r.returncode == 0, r.stderr)
+    os.remove(os.path.join(repo, ".env.local"))
     case("--body-file нет файла", ["comment", "5", "-F", "nope.md"], why="не читается")
     r = cli("comment", "5", "-F", tbody)
     check("--body-file: gh получает текст, а не путь", r.returncode == 0 and tbody not in "\0".join(gh_args() or [])
