@@ -3572,9 +3572,16 @@ def window_push_judged(texts, cwd, moved=False, cmd=""):
         return True
     if _git_cfg_moves_remote(texts) or _PUSH_CFG_ENV.search(cmd or ""):
         return True
-    remote, i = None, 0
+    remote, flag, i = None, None, 0
     while i < len(args):
         a = args[i]
+        # --repo X и --repo=X (и сокращение --rep) — тот же <repository>, что слово после push (metis-1388, Д2 argus
+        # #545): судится и он
+        name, eq, val = a.partition("=")
+        if name in ("--rep", "--repo"):
+            flag = val if eq else args[i + 1] if i + 1 < len(args) else None
+            i += 1 if eq else 2
+            continue
         if a in _PUSH_OPT_ARG:
             i += 2
             continue
@@ -3583,11 +3590,14 @@ def window_push_judged(texts, cwd, moved=False, cmd=""):
             break
         i += 1
     d = _expand(gdir, cwd) if gdir else cwd
-    if not remote:
+    if not remote and not flag:
         up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}") or ""
         remote = up.split("/", 1)[0] if "/" in up else "origin"
-    urls = [remote] if re.search(r"[/:]", remote) else \
-        (_git_out(d, "remote", "get-url", "--push", "--all", remote) or "").splitlines()
+    urls = []
+    for r in (remote, flag):
+        if r:
+            urls += [r] if re.search(r"[/:]", r) else \
+                (_git_out(d, "remote", "get-url", "--push", "--all", r) or "").splitlines()
     repos = [_mg()._repo_tail(_mg()._remote_id(u)) if u.strip() else "" for u in urls]
     merge = _merge_repo_set()
     return not repos or any(not r or r in merge for r in repos)

@@ -235,6 +235,25 @@ def main():
             if deny:
                 check(f"подсказка git -C {'есть' if hint else 'нет'}: {cmd}", ("назови папку через git -C" in why)
                       == hint, why)
+        # metis-1388 (Д2 argus #545): --repo X и --repo=X — тот же <repository>, что слово после push; в копии, где
+        # origin вне [merge_repos], адрес из --repo судится, а не пропускается вместе с флагом
+        third = os.path.join(root, "third")
+        os.makedirs(third)
+        git(third, "init", "-q", "-b", "main")
+        git(third, "commit", "-q", "--allow-empty", "-m", "a")
+        git(third, "remote", "add", "origin", "https://github.com/latark/pantheon.git")
+        git(third, "remote", "add", "ak", ak)
+        for cmd, deny in (
+                (f"git -C {third} push --repo={ak}", True),
+                (f"git -C {third} push --repo {ak}", True),
+                (f"git -C {third} push --rep={ak}", True),
+                (f"git -C {third} push --repo=ak", True),
+                (f"git -C {third} push --repo=https://github.com/latark/pantheon.git", False),
+                (f"git -C {third} push --repo=origin", False),
+                (f"git -C {third} push", False)):
+            why = g.check_push(win, "Bash", {"command": cmd})
+            got = isinstance(why, str) and why.startswith("Правило push")
+            check(f"check_push окно (metis-1388): {cmd} — {'отказ' if deny else 'можно'}", got == deny, why)
         os.environ.pop("PANTHEON_ROLE", None)
     finally:
         shutil.rmtree(root, ignore_errors=True)
