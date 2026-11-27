@@ -262,7 +262,7 @@ try:
     open(os.path.join(tmpd, "ok.md"), "w").write("можно\n")
     deny_forms = {"win-abs": [f"{tmpd}/deny-me/**"], "win-dir": [f"{tmpd}/deny-me"], "win-glob": [f"{tmpd}/deny-*/*"],
                   "win-name": ["deny-me"]}
-    deny_mut = ("    if _read_closed(full):\n", "    if False:\n")
+    deny_mut = ("    if _read_closed(full, top):\n", "    if False:\n")
     import json
     for win, items in deny_forms.items():
         json.dump({"sandbox": {"filesystem": {"denyRead": items}}}, open(os.path.join(state, "settings", win + ".json"), "w"))
