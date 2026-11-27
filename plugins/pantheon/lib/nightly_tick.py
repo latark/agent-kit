@@ -45,6 +45,7 @@ REPO_NAME = "agent-kit"   # имя репозитория каталога; вл
 DIRECTION = "metis-pantheon"
 ALERT_KEY = "nightly-tick"
 STALE_KEY = "nightly-tick-stale"
+NOCAT_KEY = "nightly-tick-nocatalog"
 WHO = "pantheon-tick"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 STAMP_RE = re.compile(r"^\ufeff?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?", re.M)
@@ -297,6 +298,14 @@ def tick(t):
     last = st.get("checked")
     if isinstance(last, (int, float)) and 0 <= t - last < CHECK_EVERY:
         return None
+    if not P.catalog_repo():  # metis-1398: без каталога agent-kit repos() пуст — не молчим, а пишем строку и тревогу
+        st["checked"] = t
+        P.write_json(state_file(), st)
+        text = "нет каталога"
+        log(t, text)
+        P.alert_once(NOCAT_KEY, text, "ночной полный набор: нет каталога agent-kit (known_marketplaces) — итог не читается", WHO)
+        return text
+    P.clear_once(NOCAT_KEY)
     st["checked"] = t
     if not isinstance(st.get("first"), (int, float)):
         st["first"] = t

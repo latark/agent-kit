@@ -277,5 +277,7 @@ def tick(t):
     st["last"] = text
     P.write_json(state_file(), st)
     # metis-1386: обрыв сети (fetch SSL_ERROR_SYSCALL) — тревога на третьем проходе подряд, не на первом
-    P.alert_net(ALERT_KEY, "; ".join(fails)[:300], "выпуск без Actions: " + "; ".join(fails)[:300], WHO)
+    # metis-1403: сетевой признак — по каждой ошибке: настоящая ошибка рядом с сетевой не ждёт 3 прохода
+    shown = "; ".join([f for f in fails if not P.net_error(f)] or fails)
+    P.alert_net(ALERT_KEY, shown[:300], "выпуск без Actions: " + shown[:300], WHO)
     return text

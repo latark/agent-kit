@@ -391,6 +391,28 @@ OWN[0] = "owner2/other"
 check("[1389] каталог не agent-kit → пусто", MT.repos() == [], MT.repos())
 OWN[0] = REPO
 
+# metis-1398: каталога нет → строка и тревога, а не молчание
+w = World("stale")
+OWN[0] = None
+out = MT.tick(T)
+check("[1398] нет каталога → строка «нет каталога» в tick.log", out == "нет каталога" and "map-tick: нет каталога" in w.tick_log(),
+      (out, w.tick_log()))
+check("[1398] нет каталога → тревога по NOCAT_KEY, карту не трогали", [a[0] for a in w.alerts] == [MT.NOCAT_KEY]
+      and not w.heavy_calls and not w.origin_log()[0].startswith("карта:"), (w.alerts, w.heavy_calls))
+OWN[0] = REPO
+
+# metis-1403: сетевой признак — по каждой ошибке, не по склейке
+w = World("stale")
+_repos, _check, _net = MT.repos, MT.check, MT.P.net_error
+MT.P.net_error = lambda text: "TLS" in str(text)
+MT.repos = lambda: ["a/x", "b/y"]
+MT.check = lambda repo, t, st: (repo, "TLS handshake timeout" if repo == "a/x" else "--update код 1", False)
+MT.tick(T)
+MT.repos, MT.check, MT.P.net_error = _repos, _check, _net
+shown = w.alerts[-1][1] if w.alerts else ""
+check("[1403] сеть рядом с настоящей ошибкой: в alert_net уходит только настоящая — не сетевая, тревога сразу",
+      "код 1" in shown and "TLS" not in shown, (w.alerts, w.cleared))
+
 
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)
