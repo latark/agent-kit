@@ -36,6 +36,7 @@ _ROOT = os.path.realpath(mkroot("map-tick-"))
 atexit.register(shutil.rmtree, _ROOT, True)
 os.environ.pop("PANTHEON_DRYRUN", None)
 REPO = "latark/agent-kit"
+OWN = [REPO]   # owner/repo каталога этой установки (known_marketplaces); None — источника нет
 T = int(time.time())
 FAILS = []
 CHECKS = []
@@ -132,7 +133,7 @@ class World:
             alert_once=lambda key, value, text, who="pantheon", **kw: self.alerts.append((key, value, text, who, kw)),
             clear_once=lambda key: self.cleared.append(key),
             pid_alive=lambda pid: pid == os.getpid(),
-            merge_mod=lambda: M, release_tick_mod=lambda: RT)
+            merge_mod=lambda: M, release_tick_mod=lambda: RT, catalog_repo=lambda: OWN[0])
         M.allowed_repos = lambda: {REPO, "latark/other"}
         RT.set_core(core)
         RT.URL = self.origin
@@ -377,6 +378,15 @@ M.allowed_repos = lambda: {"evil/agent-kit", "latark/other"}
 check("agent-kit другого владельца не засчитан (map)", MT.repos() == [], MT.repos())
 M.allowed_repos = lambda: {REPO, "evil/agent-kit"}
 check("свой agent-kit засчитан, чужой с тем же именем — нет (map)", MT.repos() == [REPO], MT.repos())
+OWN[0] = "owner2/agent-kit"
+M.allowed_repos = lambda: {REPO, "evil/agent-kit", "owner2/agent-kit"}
+check("[1389] владелец берётся из установки, а не из кода", MT.repos() == ["owner2/agent-kit"], MT.repos())
+OWN[0] = None
+check("[1389] источника каталога нет → пусто", MT.repos() == [], MT.repos())
+OWN[0] = "owner2/other"
+check("[1389] каталог не agent-kit → пусто", MT.repos() == [], MT.repos())
+OWN[0] = REPO
+
 
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)

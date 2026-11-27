@@ -490,6 +490,14 @@ def scen_released(R, tmp):
                                                                                          "guard": "0.5.1"}),
         ("released: другой репозиторий — None", lambda: got({"pantheon": "1"}, "latark/other") is None),
         ("released: нет releases.json — None", lambda: got(None, REPO) is None),
+        ("catalog_repo: source.repo установки, строчными (metis-1389)",
+         lambda: (catalog(tmp, None), R.catalog_repo())[1] == REPO.lower()),
+        ("catalog_repo: нет known_marketplaces — None",
+         lambda: (os.remove(os.path.join(tmp, ".claude", "plugins", "known_marketplaces.json")), R.catalog_repo())[1] is None),
+        ("catalog_repo: source.repo не owner/repo — None", lambda: (json.dump(
+            {"agent-kit": {"source": {"source": "github", "repo": "../x"}}},
+            open(os.path.join(tmp, ".claude", "plugins", "known_marketplaces.json"), "w", encoding="utf-8")),
+            R.catalog_repo())[1] is None),
     ])
 
 

@@ -41,6 +41,7 @@ _ROOT = os.path.realpath(mkroot("nightly-tick-"))
 atexit.register(shutil.rmtree, _ROOT, True)
 os.environ.pop("PANTHEON_DRYRUN", None)
 REPO = "latark/agent-kit"
+OWN = [REPO]   # owner/repo каталога этой установки (known_marketplaces); None — источника нет
 T = int(datetime(2026, 11, 14, 3, 0, tzinfo=timezone.utc).timestamp())
 C0 = T - 5 * 3600  # время запуска по умолчанию: ночь до T
 FAILS = []
@@ -112,7 +113,7 @@ class World:
             stamp=lambda t=None: time.strftime("%Y-%m-%d %H:%M", time.localtime(t)),
             alert_once=lambda key, value, text, who="pantheon", **kw: self.alerts.append((key, text)),
             clear_once=lambda key: self.cleared.append(key),
-            merge_mod=lambda: M, tasks_mod=lambda: tasks)
+            merge_mod=lambda: M, tasks_mod=lambda: tasks, catalog_repo=lambda: OWN[0])
         M.allowed_repos = lambda: {REPO, "latark/other"}
         NT.set_core(core)
         NT.gh_api = self.gh_api
@@ -382,6 +383,15 @@ M.allowed_repos = lambda: {"evil/agent-kit", "latark/other"}
 check("agent-kit другого владельца не засчитан (nightly)", NT.repos() == [], NT.repos())
 M.allowed_repos = lambda: {REPO, "evil/agent-kit"}
 check("свой agent-kit засчитан, чужой с тем же именем — нет (nightly)", NT.repos() == [REPO], NT.repos())
+OWN[0] = "owner2/agent-kit"
+M.allowed_repos = lambda: {REPO, "evil/agent-kit", "owner2/agent-kit"}
+check("[1389] владелец берётся из установки, а не из кода", NT.repos() == ["owner2/agent-kit"], NT.repos())
+OWN[0] = None
+check("[1389] источника каталога нет → пусто", NT.repos() == [], NT.repos())
+OWN[0] = "owner2/other"
+check("[1389] каталог не agent-kit → пусто", NT.repos() == [], NT.repos())
+OWN[0] = REPO
+
 
 check("локально ничего не запущено за весь тест", not LOCAL, LOCAL)
 

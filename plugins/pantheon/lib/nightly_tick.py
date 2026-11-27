@@ -41,7 +41,7 @@ GH_TIMEOUT = 90
 WORKFLOW = "tests.yml"
 EVENTS = ("schedule", "workflow_dispatch")
 SHARD = "full-shard ("
-REPO_FULL = ("latark/agent-kit",)   # owner/repo целиком: то же имя у другого владельца не в счёт (metis-1389)
+REPO_NAME = "agent-kit"   # имя репозитория каталога; владелец — из known_marketplaces этой установки (metis-1389)
 DIRECTION = "metis-pantheon"
 ALERT_KEY = "nightly-tick"
 STALE_KEY = "nightly-tick-stale"
@@ -65,7 +65,10 @@ def state_file():
 
 
 def repos():
-    return sorted(r for r in P.merge_mod().allowed_repos() if r in REPO_FULL)
+    own = P.catalog_repo()   # owner/repo установки; нет источника — не засчитываем ничего
+    if not own or own.rsplit("/", 1)[-1] != REPO_NAME:
+        return []
+    return sorted(r for r in P.merge_mod().allowed_repos() if r == own)
 
 
 def parse(out):
