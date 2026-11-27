@@ -402,6 +402,33 @@ def test_sandbox_clean_readonly_dirs_1379():
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_unlock_tree_one_pass_1423():
+    """metis-1423: _unlock_tree за один вызов открывает всё дерево папок 0o000, а не по уровню за проход."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    from _py311 import unlock_tree
+    base = mkroot("unlock-1423-")
+    try:
+        top = os.path.join(base, "t")
+        chain = [top]
+        for n in ("a", "b", "c", "d"):
+            chain.append(os.path.join(chain[-1], n))
+        os.makedirs(chain[-1])
+        for q in reversed(chain):
+            os.chmod(q, 0o000)
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            w._unlock_tree("t", fd)
+        finally:
+            os.close(fd)
+        bad = [q for q in chain if stat.S_IMODE(os.stat(q).st_mode) != 0o700]
+        check(not bad, f"за один проход остались закрытые папки: {bad}")
+    finally:
+        unlock_tree(base)
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_sandbox_clean_swap_0620():
     """Окно подменяет папку части ссылкой наружу между проверкой и удалением: цель снаружи цела."""
     import importlib

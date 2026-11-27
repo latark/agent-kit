@@ -2255,27 +2255,28 @@ def _open_dir(name, dir_fd=None):
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
 
 
-def _unlock_tree(name, dir_fd):
-    """metis-1379: тесты оставляют в кэше папки без права записи (0o555, 0o500): rmtree в них падает EACCES, и те же
-    57 записей не удалялись каждый проход. Возвращает владельцу rwx на папках записи (по дескрипторам, ссылки не
-    трогаем: цель ссылки чужая). Ошибки глотаем: что не открылось, удалит повторный rmtree или останется в счёте."""
-    try:
-        top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
-            top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
-            os.close(top)
+def _unlock_tree(name, dir_fd, depth=0):
+    """metis-1379, metis-1423: тесты оставляют в кэше папки без права записи и чтения (0o555, 0o500, 0o000): rmtree в
+    них падает EACCES. Возвращает владельцу rwx на папке и на всех вложенных за один проход: права снимаются ДО
+    открытия папки (os.fwalk открывал потомка раньше, чем доходил до chmod, и 0o000 снималась по уровню за проход).
+    Идём по дескрипторам, ссылки не трогаем: цель ссылки чужая. Ошибки глотаем: что не открылось, удалит повторный
+    rmtree или останется в счёте."""
+    if depth > 200:
         return
-    os.close(top)
-    with contextlib.suppress(OSError):
+    try:
+        if not stat.S_ISDIR(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+            return
         os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
-    for _dp, dirs, _files, fd in os.fwalk(name, dir_fd=dir_fd, follow_symlinks=False,
-                                          onerror=lambda e: None):
-        for d in dirs:
-            with contextlib.suppress(OSError):
-                if stat.S_ISDIR(os.stat(d, dir_fd=fd, follow_symlinks=False).st_mode):
-                    os.chmod(d, 0o700, dir_fd=fd, follow_symlinks=False)
+        fd = _open_dir(name, dir_fd)
+    except OSError:
+        return
+    try:
+        for entry in os.listdir(fd):
+            _unlock_tree(entry, fd, depth + 1)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def sandbox_clean(root, t, opened, days=None):
