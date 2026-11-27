@@ -298,6 +298,34 @@ try:
     r = cli("comment", "5", "-F", "body.md", lib=mlib)
     check("managed deny Read(.env*): обычный файл копии — код 0", r.returncode == 0, r.stderr)
     os.remove(os.path.join(repo, ".env.local"))
+    # metis-1418, Д1: Read(./secrets/**) из managed — файл secrets/x копии закрыт (имя без «/» — компонент любого пути)
+    os.makedirs(os.path.join(repo, "secrets"))
+    open(os.path.join(repo, "secrets", "x"), "w").write("KEY=secret\n")
+    sec_old = '    if "/" not in rel and not spec.startswith("/"):\n        return [rel]'
+    check("самопроверка: ветка «имя без /» в _read_rule — одна", src.count(sec_old) == 1)
+    mlib_sec = managed_lib("lib-managed-sec")
+    shutil.copy(os.path.join(mlib_sec, "pr_out.py"), os.path.join(mlib_sec, "pr_out.src"))
+    open(os.path.join(mlib_sec, "pr_out.py"), "w", encoding="utf-8").write(
+        open(os.path.join(mlib_sec, "pr_out.src"), encoding="utf-8").read().replace(sec_old, '    if "/" not in rel and not spec.startswith("/"):\n        return []'))
+    for flag in ("-F", "--body-file"):
+        r = cli("comment", "5", flag, "secrets/x", lib=mlib)
+        check(f"managed deny Read(./secrets/**): {flag} secrets/x — отказ", refused(r) and "закрыт окну на чтение" in r.stderr, r.stderr)
+        r = cli("comment", "5", flag, "secrets/x", lib=mlib_sec)
+        check(f"мутант убит: {flag} secrets/x без правила «имя без /» доходит до gh", gh_args() is not None, r.stderr)
+    os.remove(os.path.join(repo, "secrets", "x"))
+    # metis-1418, Д2: deny окна лежит и в файле запуска settings/run/<PANTHEON_SESSION>.json — его читаем наравне с
+    # settings/<окно>.json (окно без своего файла настроек, deny только в файле запуска)
+    os.makedirs(os.path.join(state, "settings", "run"))
+    json.dump({"sandbox": {"filesystem": {"denyRead": [f"{tmpd}/deny-me/**"]}}},
+              open(os.path.join(state, "settings", "run", "ses-1.json"), "w"))
+    run_env = {"PANTHEON_WINDOW": "win-none", "PANTHEON_SESSION": "ses-1"}
+    case("--body-file закрыт denyRead файла запуска settings/run/<сессия>.json", ["comment", "5", "-F", closed_f],
+         env=run_env, mut=('        files.append(P.path("settings", "run", ses + ".json"))\n', "        pass\n"),
+         why="закрыт окну на чтение")
+    r = cli("comment", "5", "-F", os.path.join(tmpd, "ok.md"), env=run_env)
+    check("файл запуска: путь вне его denyRead — код 0", r.returncode == 0, r.stderr)
+    r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_WINDOW": "win-none", "PANTHEON_SESSION": "../run/ses-1"})
+    check("имя сессии с «/» или «..» файл запуска не выбирает — закрытого нет, код 0", r.returncode == 0, r.stderr)
     case("--body-file нет файла", ["comment", "5", "-F", "nope.md"], why="не читается")
     r = cli("comment", "5", "-F", tbody)
     check("--body-file: gh получает текст, а не путь", r.returncode == 0 and tbody not in "\0".join(gh_args() or [])
