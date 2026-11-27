@@ -7,6 +7,7 @@ pantheon._attach до выполнения этого файла, имена и�
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,15 +48,19 @@ def _version_newer(new, old):
         return str(new) != str(old)
 
 
+def _plain_version(v):
+    """Версия вида 1.2.3 (ASCII-цифры через точки) или None: мусор из verified.json не сравнивается."""
+    return v if isinstance(v, str) and re.fullmatch(r"[0-9]+(\.[0-9]+)*", v) else None
+
+
 def _known_version(name, installed_version):
-    """«Старая» версия для сравнения с каталогом (metis-0922): последняя проверенная по verified.json, а не установленная.
-    Claude Code 2.1.319 сам ставит выпуск при `marketplace update`, и установленная уже равна каталогу, а живой код
-    (current, окна) стоит на проверенной. Записи нет или версия в ней не разбирается — установленная."""
+    """«Старая» версия для сравнения с каталогом (metis-0922, metis-0924): последняя проверенная по verified.json, а не
+    установленная. Claude Code 2.1.319 сам ставит выпуск при `marketplace update`, и установленная уже равна каталогу,
+    а живой код (current, окна) стоит на проверенной. Проверенная новее установленной (ручной откат) — берётся она: max,
+    каталог между ними не ставится. Записи нет или версия в ней мусор (не числа через точку) — установленная."""
     rec = P.verified_record(name) or {}
-    ver = rec.get("version")
-    if isinstance(ver, str) and ver and all(x.isdigit() for x in ver.split(".")):
-        return ver
-    return installed_version
+    ver = _plain_version(rec.get("version") if isinstance(rec, dict) else None)
+    return ver or installed_version
 
 
 def _plugins_installed():
@@ -195,8 +200,16 @@ def _plugin_install(name, old, new, quiet, digest):
     _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (выпуск {new}, хеш {digest})")
     text = (f"встала непроверенная версия {name} {seen} (выпуск {new}) — живой код и окна остаются на последнем "
             "проверенном дереве; что делать — README agent-kit, «Живой код»")
-    P.alert("КРИТИЧНО: " + text, "plugins-update")
-    P.notify(text, title="Пантеон · критично", group="critical")
+    # metis-0924: подменённое дерево стоит, пока его не уберут, — тревога и уведомление один раз на (выпуск, хеш)
+    key = f"plugins-update-bad-{name}"
+    mark = P.once_path(key)
+    try:
+        fresh = open(mark).read() != f"{new}:{bad}"
+    except OSError:
+        fresh = True
+    P.alert_once(key, f"{new}:{bad}", "КРИТИЧНО: " + text, "plugins-update")
+    if fresh:
+        P.notify(text, title="Пантеон · критично", group="critical")
     if not quiet:
         print(f"{name}: КРИТИЧНО — {text}")
     return P.ALERTED
