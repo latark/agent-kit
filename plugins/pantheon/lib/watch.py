@@ -441,6 +441,7 @@ def _watch(dry=False):
               ("поручения во входящих", lambda: awake().inbox_wake(agents, reg, doms, t)),
               ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t)),
+              ("петля ревью argus", lambda: P.review_loop(t)),   # metis-1347
               # последней: сессии, которые она уберёт, в этом проходе ещё в списке — подъём выше их уже не тронет
               ("уборка Гестии", lambda: hestia_reap(agents, t)),
               ("уборка сессий", lambda: auto_rm(agents, doms, t))]
@@ -457,7 +458,8 @@ def blind_checks(t):
             ("кэши песочниц", lambda: sandbox_sweep(t)),
             ("версия Claude Code", lambda: cc_version(t, blind=True)),
             ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
-            ("журналы ваших слов", lambda: daily(t))]
+            ("журналы ваших слов", lambda: daily(t)),
+            ("петля ревью argus", lambda: P.review_loop(t))]   # metis-1347
 
 
 def run_checks(checks, t):
