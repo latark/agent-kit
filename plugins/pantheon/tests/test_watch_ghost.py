@@ -489,6 +489,8 @@ def test_restart_done_and_auto_close_0338():
     check(r.returncode == 0 and "без перезапуска: mm-dir" in r.stdout and "остались: mm-dir" in e.alerts(),
           f"0338: --done с остатком: {r.stdout!r} {e.alerts()}")
 
+    pids = {zold: 76, znew: 77}  # metis-0837 Д4: перезапуск судит процесс (pid), у метки saved есть pid
+
     def zeus_case(saved_sid, live_sid, done=True):
         e = Env()
         e.direction("mm-dir")
@@ -496,9 +498,9 @@ def test_restart_done_and_auto_close_0338():
         os.makedirs(e.st("maintenance"), exist_ok=True)
         if done:
             open(e.st("maintenance", "mm-dir.done"), "w").write("x\n")
-        json.dump({"time": "2026-10-15 10:00:00", "state": "S", "by": "zeus", **({"sessionId": saved_sid} if saved_sid else {})},
+        json.dump({"time": "2026-10-15 10:00:00", "state": "S", "by": "zeus", **({"sessionId": saved_sid, "pid": pids[saved_sid]} if saved_sid else {})},
                   open(e.st("maintenance", "zeus.json"), "w"))
-        e.agents([bg("zeus", "working", live_sid, pid=77)] if live_sid else [])
+        e.agents([bg("zeus", "working", live_sid, pid=pids[live_sid])] if live_sid else [])
         return e, e.run("restart", "--status", t=T0 + 60)
     e, r = zeus_case(zold, znew)
     check(r.returncode == 0 and not os.path.exists(e.st("maintenance.json")) and "перезапуск завершён" in r.stdout
