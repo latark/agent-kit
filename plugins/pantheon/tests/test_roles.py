@@ -112,7 +112,7 @@ def check_plan10(texts, flat, callers):
           "git clone — только явным путём в своей папке `$TMPDIR`, без `$(…)`: `git clone --depth 1 <url> "
           "\"$TMPDIR/<имя>\"`" in flat.get("prometheus.md", ""))
     plan6a = {"argus.md": ("opus", "medium"), "dev-opus.md": ("opus", "medium"), "chiron.md": ("opus", "medium"),
-              "workshop.md": ("opus", "medium"), "prometheus.md": ("sonnet", "medium"), "momus.md": ("fable", "medium")}
+              "workshop.md": ("opus", "medium"), "prometheus.md": ("sonnet", "medium"), "momus.md": ("opus", "medium")}
     for f, (model, effort) in plan6a.items():
         fm = texts.get(f, "").split("---")[1] if texts.get(f, "").count("---") >= 2 else ""
         check(f"{f}: в шапке model: {model} и effort: {effort} (план 1.0, раздел 6а)",
