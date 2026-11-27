@@ -864,8 +864,32 @@ def alert_daily(key, text, who="pantheon", window=ALERT_WINDOW):
     except (OSError, ValueError):
         pass
     alert(text, who)
-    os.makedirs(path("once"), exist_ok=True)
-    open(mark, "w").write(str(t))
+    _mark_write(mark, str(t))
+
+
+def _mark_write(mark, text):
+    """Отметка в STATE/once; из песочницы окна запись бывает закрыта (PermissionError) — тревога уже ушла, не падаем
+    (metis-1397). False — не записали: следующий проход повторит тревогу."""
+    try:
+        os.makedirs(os.path.dirname(mark), exist_ok=True)
+        write_atomic(mark, text)
+        return True
+    except OSError:
+        return False
+
+
+def alert_fold_clear(prefix):
+    """Причина ушла: сбросить счётчики всех ключей alert_fold, начатых с prefix (ключ — prefix + 8 hex), чтобы вернувшаяся
+    причина не показала старое «×N с <дата>» (metis-1396)."""
+    safe = re.escape("fold-" + re.sub(r"[^\w.-]", "_", prefix))
+    try:
+        names = os.listdir(path("once"))
+    except OSError:
+        return
+    for fn in names:
+        if re.fullmatch(safe + r"[0-9a-f]{8}-[0-9a-f]{8}", fn):
+            with contextlib.suppress(OSError):
+                os.remove(path("once", fn))
 
 
 def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
@@ -881,14 +905,13 @@ def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
         last, n = float(st["t"]), int(st.get("n") or 0)
     except (OSError, ValueError, TypeError, KeyError):
         last, n = None, 0
-    os.makedirs(path("once"), exist_ok=True)
     if last is not None and last <= t < last + window:  # замер из будущего (часы назад) окно не продлевает
-        write_atomic(mark, json.dumps({"t": last, "n": n + 1}))
+        _mark_write(mark, json.dumps({"t": last, "n": n + 1}))
         return False
     if last is not None and n > 0:
         text = f"{text} (повторов ×{n} с {stamp(last)})"
     alert(text, who)
-    write_atomic(mark, json.dumps({"t": t, "n": 0}))
+    _mark_write(mark, json.dumps({"t": t, "n": 0}))
     return True
 
 
@@ -9373,8 +9396,10 @@ def check_no_parent(T, quiet):
                  and t - (T.ts_of(h.get("created")) or t) > NO_PARENT_AGE)
     try:
         packs = _plugin_map_mod("plancheck").uncovered_packs(PANTHEON, tasks, t, T)
-    except Exception:  # план не должен ронять check: сверка пачек — подсказка, а не защита
+    except Exception as e:  # план не должен ронять check: сверка пачек — подсказка, а не защита; но и не молча (metis-1395)
         packs = []
+        if not quiet:
+            print(f"предупреждение · сверка пачек с планом не вышла: {type(e).__name__}: {e}", file=sys.stderr)
     if not quiet:
         if ids:
             print(f"предупреждение · задачи без пачки старше суток: {_ids_text(ids)} — pantheon task batch-suggest, "
