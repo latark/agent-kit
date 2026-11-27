@@ -109,6 +109,37 @@ isolate_env(os.environ, mirror_root)
 PY311 = python_without_claude(sys.executable)
 
 
+def unlock_tree(root):
+    """metis-1400: вернуть права 0o700 на root и все каталоги под ним (до листинга), чтобы rmtree смог их удалить."""
+    try:
+        os.chmod(root, 0o700)
+    except OSError:
+        return
+    for d, dirs, _files in os.walk(root):
+        for n in dirs:
+            p = os.path.join(d, n)
+            if not os.path.islink(p):
+                try:
+                    os.chmod(p, 0o700)
+                except OSError:
+                    pass
+
+
+def readonly_dirs(root):
+    """metis-1400: каталоги под root (и он сам) без права записи владельца — их rmtree не удалит, в TMPDIR копится мусор."""
+    bad = []
+    for d, dirs, _files in os.walk(root):
+        for p in [d] + [os.path.join(d, n) for n in dirs]:
+            if not os.path.islink(p) and not os.stat(p).st_mode & 0o200 and p not in bad:
+                bad.append(p)
+    return bad
+
+
+def rmtree_force(root):
+    unlock_tree(root)
+    shutil.rmtree(root, True)
+
+
 # Запасные корни тестов в окне роли: свой TMPDIR песочницы Claude Code. «%d» — uid.
 SPARE = ("/tmp/claude-%d", "/private/tmp/claude-%d")
 
@@ -162,34 +193,3 @@ def mkroot(prefix, first=None, spare=None):
         if fs_ok(base):
             return tempfile.mkdtemp(prefix=prefix, dir=base)
     return tempfile.mkdtemp(prefix=prefix)
-
-
-def unlock_tree(root):
-    """metis-1400: вернуть права 0o700 на root и все каталоги под ним (до листинга), чтобы rmtree смог их удалить."""
-    try:
-        os.chmod(root, 0o700)
-    except OSError:
-        return
-    for d, dirs, _files in os.walk(root):
-        for n in dirs:
-            p = os.path.join(d, n)
-            if not os.path.islink(p):
-                try:
-                    os.chmod(p, 0o700)
-                except OSError:
-                    pass
-
-
-def readonly_dirs(root):
-    """metis-1400: каталоги под root (и он сам) без права записи владельца — их rmtree не удалит, в TMPDIR копится мусор."""
-    bad = []
-    for d, dirs, _files in os.walk(root):
-        for p in [d] + [os.path.join(d, n) for n in dirs]:
-            if not os.path.islink(p) and not os.stat(p).st_mode & 0o200 and p not in bad:
-                bad.append(p)
-    return bad
-
-
-def rmtree_force(root):
-    unlock_tree(root)
-    shutil.rmtree(root, True)
