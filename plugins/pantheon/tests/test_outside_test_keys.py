@@ -80,6 +80,16 @@ _r = O.redact(f"a {URL_APP} b {PW} c S3cr%2Ft-pw-xyz d", _K)
 check("redact: строка → <SUPABASE_DB_URL>, пароль как есть и раскодированный → ***",
       all(s not in _r for s in (URL_APP, PW, "S3cr%2Ft-pw-xyz")) and "<SUPABASE_DB_URL>" in _r and _r.count("***") == 2, _r)
 check("redact: без ключей текст не меняется", O.redact("x " + PW, {}) == "x " + PW)
+# metis-1034: пароль в другой записи — %2f нижним регистром, \/ из JSON, /, вся строка с %2f — тоже вырезаются
+for _form in ("S3cr%2ft-pw-xyz", "S3cr\\/t-pw-xyz", "S3cr\\u002Ft-pw-xyz", "S3cr\\u002ft-pw-xyz", "%53%33cr/t-pw-xyz"):
+    _rf = O.redact(f"a {_form} b", _K)
+    check(f"redact: пароль в записи {_form!r} → *** (metis-1034)", _rf == "a *** b", _rf)
+_rj = O.redact('{"url": "' + URL_APP.replace("%2F", "%2f").replace("/", "\\/") + '"}', _K)
+check("redact: строка подключения в JSON (\\/ и %2f) → <SUPABASE_DB_URL> (metis-1034)",
+      _rj == '{"url": "<SUPABASE_DB_URL>"}', _rj)
+check("redact: похожее, но другое значение не трогается", O.redact("a S3crXt-pw-xyz b", _K) == "a S3crXt-pw-xyz b")
+check("redact: метка вставляется как есть (без разбора \\ в замене)",
+      O.redact("k=ab\\1cdef", {"K": "ab\\1cdef"}) == "k=<K>")
 
 # --- прогон --script на APP: ключ, профиль, libpq, вырезание -----------------------------------------------------
 LIBPQ = os.path.join(HOME, "fake-libpq", "bin")

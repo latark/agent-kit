@@ -530,9 +530,10 @@ except (OSError, ValueError):
 check("карта: упавшие при сборке файлы (broken) — среди тестов карты и идут всегда",
       set(RAWMAP.get("broken") or ()) <= amap["tests"] & amap["always"], RAWMAP.get("broken"))
 # metis-0791: правка bin/heavy — только тесты, что его запускают; линтер словаря читает heavy, но он в readers
+# 16 — после разреза тестов heavy на test_heavy_full/outside/queue (27.11)
 HEAVY = amap["files"].get("plugins/pantheon/bin/heavy", set())
-check("карта: bin/heavy → test_heavy_queue, не больше 12 тестов, без линтеров и test_watch (было 33)",
-      "pantheon/test_heavy_queue.py" in HEAVY and len(HEAVY) <= 12
+check("карта: bin/heavy → test_heavy_queue, не больше 16 тестов, без линтеров и test_watch (было 33)",
+      "pantheon/test_heavy_queue.py" in HEAVY and len(HEAVY) <= 16
       and not HEAVY & {"pantheon/test_glossary.py", "pantheon/test_watch.py"}, sorted(HEAVY))
 check("карта: readers — test_glossary (читает дерево), идёт всегда",
       "pantheon/test_glossary.py" in (RAWMAP.get("readers") or ()) and "pantheon/test_glossary.py" in amap["always"],
@@ -544,7 +545,7 @@ gone = sorted(p for p in R.FULL if not os.path.isfile(os.path.join(REPO, p)))
 check("FULL: только существующие файлы", not gone, gone)
 # карта по прогону видит ленивую загрузку: watch.py грузит pantheon.py по требованию, по тексту test_tick его не зовёт
 for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
-                 ("plugins/guard/hooks/guard.py", "guard/test_guard.py"),
+                 ("plugins/guard/hooks/guard.py", "guard/test_guard_hooks.py"),
                  ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate_ci.py"),
                  ("plugins/project-tools/lib/project_tools.py", "project-tools/test_project_tools.py")):
     check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()),

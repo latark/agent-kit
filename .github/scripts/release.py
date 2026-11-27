@@ -22,6 +22,9 @@ PR `version` в plugins/<плагин>/.claude-plugin/plugin.json и файл .c
    свежий <branch> с отвязанным HEAD (`checkout --detach FETCH_HEAD`, не `-B`: он двигал бы локальную ветку, даже
    открытую в другой worktree, и файлы той папки оставались старыми, metis-0814) и пересчёт с шага 1, до трёх
    попыток: свежий запуск покрывает и новое слияние. Локальные ветки скрипт не трогает.
+6. --push исполняет только себя из main (metis-0902, T7): после каждого fetch байты этого файла сверяются с
+   `FETCH_HEAD:.github/scripts/release.py`; не совпали (запуск из ветки, правленая копия, main ушёл с новой версией
+   скрипта) — код 1 без push. git идёт без ~/.gitconfig и системного config (GIT_CONFIG_GLOBAL=/dev/null, NOSYSTEM).
 
 Привилегированная цепочка (contents: write) — только этот файл и release.yml, оба в ядре шлюза (.github целиком,
 CORE_DIR в merge_gate.py): PR, правящий их, сливает владелец. Скрипт ничего не импортирует из репозитория.
@@ -30,7 +33,7 @@ CORE_DIR в merge_gate.py): PR, правящий их, сливает владе
 такой коммит шлюз не сольёт (PR трогает version), откат — `git reset --keep HEAD~1`.
 
 Коды: 0 — готово или поднимать нечего; 1 — отказ (дерево не чистое, в plugins/ нет plugin.json, version не разобрать,
-сверка не сошлась, push не прошёл за три попытки); 2 — неверный вызов. Последняя строка вывода — итог или причина.
+сверка не сошлась, скрипт не из main, push не прошёл за три попытки); 2 — неверный вызов. Последняя строка вывода — итог или причина.
 """
 import hashlib
 import json
@@ -45,6 +48,7 @@ VERSION_LINE = re.compile(r'("version"\s*:\s*")([^"\\]*)(")')
 VERSION_G = '"version"[[:space:]]*:'  # -G git: строка version добавлена или убрана в plugin.json
 BOT = ("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com")
 ATTEMPTS = 3
+SELF = ".github/scripts/release.py"
 USAGE = "release.py [--push] [--remote <имя>] [--branch <ветка>]"
 
 
@@ -52,12 +56,29 @@ class Refuse(Exception):
     pass
 
 
+def git_env():
+    """Окружение git без GIT_* вызывающего, ~/.gitconfig и системного config (metis-0902)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
 def git(root, *args, check=True):
-    r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
-                       env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+    r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, env=git_env())
     if check and r.returncode != 0:
         raise Refuse(f"git {' '.join(args)} — код {r.returncode}: {(r.stderr or r.stdout).strip()}")
     return r
+
+
+def same_as_main(root):
+    """Байты исполняемого файла = FETCH_HEAD:.github/scripts/release.py, иначе Refuse (T7, metis-0902)."""
+    r = subprocess.run(["git", "-C", root, "cat-file", "blob", f"FETCH_HEAD:{SELF}"], capture_output=True,
+                       env=git_env())
+    with open(os.path.abspath(__file__), "rb") as fh:
+        mine = fh.read()
+    if r.returncode != 0 or r.stdout != mine:
+        raise Refuse(f"исполняемый release.py не совпал с {SELF} свежего main — push только скриптом из main, номер не "
+                     "поднят")
 
 
 def manifest(name):
@@ -225,6 +246,7 @@ def main(argv):
         for attempt in range(1, ATTEMPTS + 1 if push else 2):
             if push:
                 git(root, "fetch", "-q", remote, branch)
+                same_as_main(root)
                 git(root, "checkout", "-q", "--detach", "FETCH_HEAD")
             what = release_once(root)
             if what is None:

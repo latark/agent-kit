@@ -4290,7 +4290,8 @@ def pack_admit(window, plugin_dir, mcp_text):
     (WINDOW_RULES.pack_problems, ревью argus #425 Б1)? Плагин (хуки) и MCP проверяются раздельно (вариант А владельца
     13.11): плохой сервер снимает только mcp.json, хуки пакета остаются; плохой плагин снимает и плагин, и MCP —
     серверы пакета без его хуков (protect-db на supabase) не идут. Негодный сервер mcp.json снимается один, годные идут
-    (metis-1222: сервер мимо npx снимал весь MCP окна). Нарушение — строка в stderr и тревога
+    (metis-1222: сервер мимо npx снимал весь MCP окна); тревога тогда начинается со снятых и взятых серверов, до среза
+    причин (metis-1223). Нарушение — строка в stderr и тревога
     pack-bad-<window> в alerts.md; всё годно — тревога снята. → (плагин годен, текст mcp.json для окна или None)."""
     def doc(text, rel, into):
         if text is None:
@@ -4313,10 +4314,15 @@ def pack_admit(window, plugin_dir, mcp_text):
         clear_once(f"pack-bad-{window}")
         return True, mcp_text
     where, what = tilde(os.path.join(PACKS, window)), "плагин и MCP" if plug_bad else "MCP"
+    head = f"{what} пакета не взяты в окно {window}"
     if keep and not plug_bad:
-        bad.append(f"остальные серверы MCP взяты: {', '.join(sorted(keep))}")
-    print(f"pantheon: пакет {where}: {what} не взяты в окно {window} — {'; '.join(bad)[:400]}", file=sys.stderr)
-    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: {what} пакета не взяты в окно {window} — "
+        # частичное снятие (metis-1223): какие серверы сняты и какие взяты — до среза причин, а не за ним
+        servers = mcp.get("mcpServers") if isinstance(mcp, dict) else {}
+        dropped = sorted(set(servers) - set(keep)) if isinstance(servers, dict) else []
+        head = (f"серверы MCP {', '.join(dropped) or '?'} не взяты в окно {window}, "
+                f"взяты: {', '.join(sorted(keep))}")
+    print(f"pantheon: пакет {where}: {head} — {'; '.join(bad)[:400]}", file=sys.stderr)
+    alert_once(f"pack-bad-{window}", repr(bad), f"{where}: {head} — "
                + "; ".join(bad)[:500] + " (хуки — только через in_repo.py пакета, MCP — через env_from.py: npx с "
                "точной версией или бинарь ~/.local/bin из PACK_LOCAL_BINS; README, пакеты окон направлений)", "pantheon")
     return not plug_bad, (json.dumps({"mcpServers": keep}, ensure_ascii=False) if keep and not plug_bad else None)
