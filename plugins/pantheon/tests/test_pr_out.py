@@ -7,6 +7,7 @@ PR-2b): gh pr мимо песочницы окна, проверки Д2 —
 Запуск: python3 -I plugins/pantheon/tests/test_pr_out.py  (код выхода 0 — все прошли)
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -326,6 +327,23 @@ try:
     check("файл запуска: путь вне его denyRead — код 0", r.returncode == 0, r.stderr)
     r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_WINDOW": "win-none", "PANTHEON_SESSION": "../run/ses-1"})
     check("имя сессии с «/» или «..» файл запуска не выбирает — закрытого нет, код 0", r.returncode == 0, r.stderr)
+    # metis-1424: окно задачи расписания — settings/job-<роль>.json, в env только PANTHEON_ROLE
+    json.dump({"sandbox": {"filesystem": {"denyRead": [f"{tmpd}/deny-me/**"]}}},
+              open(os.path.join(state, "settings", "job-jobrole.json"), "w"))
+    case("--body-file закрыт denyRead окна задачи settings/job-<роль>.json", ["comment", "5", "-F", closed_f],
+         env={"PANTHEON_ROLE": "jobrole"}, mut=('        files.append(P.path("settings", "job-" + role + ".json"))\n', "        pass\n"),
+         why="закрыт окну на чтение")
+    r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_ROLE": "../job-jobrole"})
+    check("роль с «/» файл окна задачи не выбирает — закрытого нет, код 0", r.returncode == 0, r.stderr)
+    # metis-1424: источники сверены с sandbox_build — settings/<имя>.json пишет только write_window; его вызовы в
+    # pantheon.py: окно направления и окно задачи (name), hestia, hq. Новый вызов — новый источник: добавить его в
+    # _read_closed и сюда
+    pcore = open(os.path.join(LIB, "pantheon.py"), encoding="utf-8").read()
+    calls = sorted(re.findall(r"^\s+write_window\(out_dir, ([^,)]+)", pcore, re.M))
+    check("write_window: имена файлов окон — направление/задача (name), hestia, hq (источники _read_closed)",
+          calls == ['"hestia"', '"hq"', "name", "name"], calls)
+    check("окно задачи — job-<роль>, окно направления — по PANTHEON_WINDOW (источники _read_closed)",
+          'name = "job-" + role' in pcore and 'data["env"]["PANTHEON_WINDOW"] = window' in pcore)
     case("--body-file нет файла", ["comment", "5", "-F", "nope.md"], why="не читается")
     r = cli("comment", "5", "-F", tbody)
     check("--body-file: gh получает текст, а не путь", r.returncode == 0 and tbody not in "\0".join(gh_args() or [])

@@ -213,6 +213,11 @@ def _read_closed(full, top=None):
     files = [P.path("settings", win + ".json")] if win else []
     if ses and ses not in (".", "..") and os.sep not in ses:
         files.append(P.path("settings", "run", ses + ".json"))
+    # окно задачи расписания (sandbox_build: settings/job-<роль>.json) — без PANTHEON_WINDOW и PANTHEON_SESSION, только
+    # PANTHEON_ROLE (metis-1424): его deny тоже закрывает путь
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    if role and role not in (".", "..") and os.sep not in role:
+        files.append(P.path("settings", "job-" + role + ".json"))
     for data in [P.read_json(f, {}) for f in files] + [_json(MANAGED_FILE)]:
         if not isinstance(data, dict):
             continue
