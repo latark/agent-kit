@@ -20,7 +20,8 @@
      --ignore-noqa: ни ruff.toml, ни `# noqa` храповик не выключают. Ключ базы — файл, правило и имя функции
      (Класс.метод, внешняя.внутренняя), значение — число из сообщения ruff. Отказ: новая функция над порогом или число
      выросло. Так «одну починил, одну новую добавил» не проходит. Функция, перенесённая в другой файл с тем же именем и не
-     большим числом, проходит: запись в старом файле исчезла (разбиение больших модулей, ревизия 18.10).
+     большим числом, проходит: запись в старом файле исчезла (разбиение больших модулей, ревизия 18.10). Так же
+     проходит переименование: новая функция файла с числом не больше записи, исчезнувшей из этого же файла (metis-0878).
   3. Импорты: граф между файлами кода (без tests/ и test_*.py). Связь — `import X` и `from X import` с файлом X.py в
      репозитории (сначала в той же папке), загрузка файла по имени (spec_from_file_location, run_path, SourceFileLoader:
      строки «X.py» в той же функции; `_attach("X")`), обращение к имени P в plugins/pantheon/lib (загрузчик ставит туда
@@ -36,7 +37,9 @@
 чистая. Запись ниже базы — не отказ, а подсказка `--update` последней строкой.
 Режим (владелец 05.11, режим ускорения): файл MODE_FILE — слово warn или fail; нет файла — warn. В warn проверка
 печатает те же причины и последней строкой «храповик: предупреждение», код 0: ни CI, ни run-tests.py не краснеют, чужие
-PR не стоят. fail — отказ с кодом 1. LINT_RATCHET_MODE=fail только ужесточает (warn в переменной файл не ослабляет).
+PR не стоят. fail — отказ с кодом 1. LINT_RATCHET_MODE=fail только ужесточает (warn в переменной файл не ослабляет). Слово режима — без учёта регистра (FAIL = fail).
+Сбой самого храповика (непредвиденное исключение, не нарушение): в warn — строка «сбой самого храповика … предупреждение», код 0;
+в fail — код 1. Таймаут храповика в run-tests.py — так же (warn не красит раннер).
 --update при нарушениях отказывает в любом режиме.
 Коды: 0 — чисто; 1 — отказ (причина и «что делать» — последней строкой); 2 — нет ruff, базы, git или ruff упал.
 Только stdlib, Python 3.11+.
@@ -451,6 +454,20 @@ def orphans(base, cur):
     return out
 
 
+def take_moved(free, rule, fn, p, v):
+    """Новая функция fn в файле p продолжает свободную запись базы: тот же fn в любом файле (перенос) или любая запись
+    этого же файла с тем же числом (переименование, metis-0878 Д2: иначе «починили f, добавили g» прятало бы нарушение);
+    для того же имени число в базе не меньше v, сначала то же имя, затем меньшее число.
+    Запись берётся из free: одна запись — одной функции. → нашлась ли."""
+    cands = [(name != fn, w, name, q) for (r, name), lst in free.items() if r == rule for q, w in lst
+             if (w >= v if name == fn else w == v and q == p)]
+    if not cands:
+        return False
+    _, w, name, q = min(cands)
+    free[(rule, name)].remove((q, w))
+    return True
+
+
 def check_complexity(base, cur):
     fails, free = [], orphans(base, cur)
     for p, e in sorted(cur["files"].items()):
@@ -460,9 +477,7 @@ def check_complexity(base, cur):
                 was = old.get(rule, {}).get(fn)
                 if was is not None and v <= was:
                     continue
-                moved = [(q, w) for q, w in free.get((rule, fn), []) if w >= v]
-                if was is None and moved:
-                    free[(rule, fn)].remove(moved[0])
+                if was is None and take_moved(free, rule, fn, p, v):
                     continue
                 head = f"{p}: {fn} — {rule} {v} {what} при пороге {limit}"
                 tail = (f"в базе {was}. Что делать: не наращивай эту функцию — новую ветку вынеси в отдельную функцию"
@@ -598,15 +613,16 @@ def parse_args(argv):
 
 
 def ratchet_mode(root):
-    """fail — если так в LINT_RATCHET_MODE или первым словом MODE_FILE; иначе warn (и когда файла нет)."""
-    if os.environ.get("LINT_RATCHET_MODE", "").strip() == "fail":
+    """fail — если так в LINT_RATCHET_MODE или первым словом MODE_FILE (регистр не важен, metis-0878 Д4); иначе warn
+    (и когда файла нет)."""
+    if os.environ.get("LINT_RATCHET_MODE", "").strip().lower() == "fail":
         return "fail"
     try:
         with open(os.path.join(root, MODE_FILE), encoding="utf-8") as fh:
             word = (fh.read().split() or [""])[0]
     except OSError:
         word = ""
-    return "fail" if word == "fail" else "warn"
+    return "fail" if word.lower() == "fail" else "warn"
 
 
 def run(opts):
@@ -646,6 +662,7 @@ def run(opts):
 
 
 def main(argv):
+    opts = {}
     try:
         opts = parse_args(argv)
         if opts["mode"] == "help":
@@ -655,6 +672,14 @@ def main(argv):
     except Fatal as e:
         print(f"храповик: {e}", file=sys.stderr)
         return 2
+    except Exception as e:  # сбой самого храповика (трассировка), а не нарушение: в warn он не краснит проверку (metis-0878 Д3)
+        warn = opts.get("mode") == "check" and ratchet_mode(opts["root"]) == "warn"
+        what = f"храповик: сбой самого храповика ({type(e).__name__}: {e})"
+        if warn:
+            print(f"{what} — предупреждение, код 0, режим warn ({MODE_FILE})")
+        else:
+            print(what, file=sys.stderr)
+        return 0 if warn else 1
 
 
 if __name__ == "__main__":

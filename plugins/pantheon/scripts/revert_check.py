@@ -164,7 +164,7 @@ def runner_skips(tests, rt, exists=os.path.exists):
         if rt.PLATFORM != "darwin" and why and not (why[1] and exists(why[1])):
             skipped.append((p, f"нужен macOS — {why[0]}"))
         elif lb in rt.QUARANTINE:
-            skipped.append((p, f"карантин раннера, задача {rt.QUARANTINE[lb]}"))
+            skipped.append((p, f"карантин раннера, задача {rt.QUARANTINE[lb][0]}"))
         else:
             run.append(p)
     return run, skipped

@@ -13,7 +13,8 @@ affected-map.json и пушит коммит «карта: …» в main.
               цикл «карта → выпуск → карта» не идёт;
   [сбой]      --check код 2, --update код 1, --update тронул лишний файл → тревога, коммита нет;
               main ушёл вперёд — push отклонён без тревоги;
-              карта с непустым broken (упали при сборке) → не коммитится, тревога; broken из одного test_run_tests — коммитится;
+              карта с broken (упали при сборке) → коммитится без тревоги, итог называет файлы, хвост каждого (до 40
+              строк) — в map-tick.json broken_tails (metis-1169); broken из одного test_run_tests — без пометки;
   [частота]   повтор раньше 10 мин и живой работник — без проверки; PANTHEON_DRYRUN — ничего.
 """
 import atexit
@@ -80,6 +81,14 @@ if "--update" in sys.argv:
     broken = {"broken": ["pantheon/test_watch.py", "guard/test_refspec.py"], "broken-self": ["pantheon/test_run_tests.py"]}
     with open(os.path.join(here, "affected-map.json"), "w") as fh:
         json.dump({"note": "обновлено", "broken": broken.get(mode[1], [])}, fh, ensure_ascii=False)
+    if mode[1] == "broken":  # как печатает affected-map: FAIL файла и хвост «     | …» под ним
+        print("ok   guard/test_ok.py · 1.0 с · файлов задето 3")
+        print("FAIL pantheon/test_watch.py · 2.0 с · файлов задето 5 · код 1")
+        print("\\n".join("     | строка %d" % i for i in range(45)))
+        print("FAIL guard/test_refspec.py · 1.0 с · файлов задето 2 · код 1")
+        print("     | Traceback refspec")
+        print("ok   guard/test_after.py · 1.0 с · файлов задето 1")
+        print("     | чужой хвост")
     if mode[1] == "extra":
         open(os.path.join(here, "лишний.txt"), "w").write("x")
     print("affected-map: заглушка update")
@@ -223,13 +232,28 @@ check("--update тронул лишний файл → тревога, комм�
 w = World("broken", update="broken")
 MT.tick(T)
 MT.tick(T + MT.CHECK_EVERY + 1)
-check("карта с broken → тревога с именами файлов, коммита нет", w.alerts and "test_watch.py" in w.alerts[-1][2]
-      and "test_refspec.py" in w.alerts[-1][2] and not w.origin_log()[0].startswith("карта:"), (w.alerts, w.origin_log()))
-check("после карты с broken main не тронут и повтор на том же sha не идёт", len(w.heavy_calls) == 1, len(w.heavy_calls))
+# metis-1169: упавший при сборке файл карту не держит — run-tests гоняет его всегда (broken | readers)
+check("карта с broken вне BROKEN_OK → коммит карты в main, тревоги нет",
+      w.origin_log()[0] == f"карта: affected-map на {w.sha[:7]}" and not w.alerts, (w.origin_log(), w.alerts))
+check("карта с broken: в коммите поле broken собранной карты",
+      "test_watch.py" in git(w.origin, "show", f"main:{MAP_REL}"))
+check("итог в tick.log называет упавшие файлы и где хвосты", "отправлен в main; упали при сборке (2" in w.tick_log()
+      and "guard/test_refspec.py, pantheon/test_watch.py" in w.tick_log() and "broken_tails" in w.tick_log(),
+      w.tick_log())
+BT = w._read_json(os.path.join(w.state, "map-tick.json")).get("broken_tails") or {}
+TW = (BT.get("files") or {}).get("pantheon/test_watch.py")
+check("broken_tails: хвост каждого упавшего файла, не больше TAIL_LINES (40) последних строк, на sha карты",
+      BT.get("sha") == w.sha and TW == ["строка %d" % i for i in range(5, 45)]
+      and BT["files"].get("guard/test_refspec.py") == ["Traceback refspec"] and len(BT["files"]) == 2, BT)
+check("broken_tails: хвост после строки ok другого файла не берётся",
+      not any("чужой" in ln for v in (BT.get("files") or {}).values() for ln in v), BT)
+check("после карты с broken повтор на том же sha не идёт", len(w.heavy_calls) == 1, len(w.heavy_calls))
 w = World("broken-self", update="broken-self")
 MT.tick(T)
-check("в broken только test_run_tests → карта коммитится", w.origin_log()[0].startswith("карта:") and not w.alerts,
-      (w.origin_log(), w.alerts))
+MT.tick(T + MT.CHECK_EVERY + 1)
+check("в broken только test_run_tests → карта коммитится, в итоге его нет, broken_tails не пишется",
+      w.origin_log()[0].startswith("карта:") and not w.alerts and "упали при сборке" not in w.tick_log()
+      and "broken_tails" not in w._read_json(os.path.join(w.state, "map-tick.json")), (w.origin_log(), w.alerts))
 w = World("race")
 
 

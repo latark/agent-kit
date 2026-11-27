@@ -114,7 +114,8 @@ with open(RUNNER) as fh:
 LINE = f"{sys.executable} -I tools/run-tests.py -j 2 plugins/kit"
 FILES = {f"plugins/kit/tests/test_{x}.py": TEST_SRC.format(x=x) for x in NAMES}
 FILES.update({f"plugins/kit/lib/{x}.txt": "good\n" for x in NAMES})
-FILES.update({"tools/run-tests.py": RUNNER_SRC, "README.md": "rk\n", ".pantheon-verify": f"heavy {LINE}\n"})
+FILES.update({"tools/run-tests.py": RUNNER_SRC, "tools/quarantine_ttl.py": open(os.path.join(os.path.dirname(RUNNER), "quarantine_ttl.py")).read(),
+               "README.md": "rk\n", ".pantheon-verify": f"heavy {LINE}\n"})
 
 
 def test_hash(x):
@@ -251,6 +252,17 @@ def _file(name, text):
     return put, lambda: os.remove(os.path.join(GITDIR, name))
 
 
+def _live_mb(sha, base, mb):
+    """live_test на идущий (running, без base — полный набор вместо узкого) итог с merge-base B0 в очереди STATE."""
+    rid = "20261105-900000-bbbbbb"
+    os.makedirs(O.root("queue"), mode=0o700, exist_ok=True)   # save_result папку заявок не создаёт, а к этому месту очереди ещё нет
+    O.save_result(O.root("queue"), rid, {"state": "running", "kind": "test", "sha": sha, "src": RK, "mb": B0})
+    try:
+        return O.live_test(RK, sha, base=base, mb=mb) == (O.root("queue"), rid)
+    finally:
+        os.remove(os.path.join(O.root("queue"), rid + ".result.json"))
+
+
 git("checkout", "-q", "-b", "hist", F3)
 for label, word, (setup, undo) in (
         ("shallow", "shallow", _file("shallow", B0 + "\n")),
@@ -261,7 +273,13 @@ for label, word, (setup, undo) in (
     setup()
     try:
         n0, k0 = ncalls(), len(tests_for(hx))
-        rx = run()
+        _saved, _runs = O.save_result, []
+        O.save_result = lambda q, r, res, private=None, _r=_runs, _s=_saved: (_r.append(res), _s(q, r, res, private))[1]
+        try:
+            rx = run()
+        finally:
+            O.save_result = _saved
+        _mb = [x.get("mb") for x in _runs if x.get("state") == "running"]
         recs = tests_for(hx)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -271,6 +289,13 @@ for label, word, (setup, undo) in (
     check(f"{label}: полный набор вместо узкого — команда без --affected, итог без base, narrow_why «{word}»",
           ncalls() == n0 + 1 and last_cmd()[-1] == LINE and "base" not in rx and word in rx.get("narrow_why", "")
           and rx.get("code") == 0 and rx.get("record"), rx)
+    # info/grafts подрезает родителей F3 — git merge-base честно отвечает «общего предка нет», и mb=None (не посчитан) верен;
+    # shallow и refs/replace merge-base не меняют — там B0
+    _want = None if word == "info/grafts" else B0
+    check(f"{label}: итог running несёт merge-base заявки (metis-0855 Д3), хотя base нет"
+          + (" — при grafts git его не находит, None" if _want is None else ""), _mb and set(_mb) == {_want}, _mb)
+    check(f"{label}: live_test — тот же mb сцепляет с идущим, другая — нет",
+          _live_mb(hx, M1, B0) and not _live_mb(hx, M1, F1), (hx, M1, B0))
     check(f"{label}: запись полная (без --affected) — её шлюз засчитает и ядру; status называет причину",
           len(recs) == k0 + 1 and "--affected" not in recs[-1]["cmd"] and "полный набор, а не узкий" in out.getvalue(),
           (recs[-1:], out.getvalue()))
@@ -355,6 +380,16 @@ try:
 finally:
     os.chdir(cwd)
 
+# metis-0855 Д3: идущий узкий прогон (base M1, mb B0) — заявка с той же mb сцеплена, с другой (перепись истории) — нет
+_rid = "20261105-900001-bbbbbb"
+O.save_result(O.root("queue"), _rid, {"state": "running", "kind": "test", "sha": F3, "src": RK, "base": M1, "mb": B0})
+try:
+    check("live_test: та же база и mb — один прогон; другая mb при той же вершине — свой прогон",
+          O.live_test(RK, F3, base=M1, mb=B0) == (O.root("queue"), _rid)
+          and O.live_test(RK, F3, base=M1, mb=F1) is None, (O.live_test(RK, F3, base=M1, mb=B0), O.live_test(RK, F3, base=M1, mb=F1)))
+finally:
+    os.remove(os.path.join(O.root("queue"), _rid + ".result.json"))
+
 # --- 7. проход: handle несёт base заявки в run_test и в run_test_at (test --sha --affected) --------------------------
 _registry, O.registry = O.registry, lambda window=None: [os.path.dirname(RK)]
 try:
@@ -382,7 +417,7 @@ for name, extra in (("короткий", {"base": M1[:12]}), ("заглавны�
 # --- 8. карантин раннера (metis-1050): упал файл из QUARANTINE — код 0, итог разобран, запись tests есть ------------
 git("checkout", "-q", "-b", "quar", B0)
 assert RUNNER_SRC.count("QUARANTINE = {") == 1
-Q1 = commit({"tools/run-tests.py": RUNNER_SRC.replace("QUARANTINE = {", 'QUARANTINE = {"kit/test_c.py": "metis-0000",'),
+Q1 = commit({"tools/run-tests.py": RUNNER_SRC.replace("QUARANTINE = {", 'QUARANTINE = {"kit/test_c.py": ("metis-0000", "2099-01-01"),'),
              "plugins/kit/lib/c.txt": "bad\n"}, "q1: c красный, но в карантине раннера")
 rq = run()
 recq = tests_for(Q1)
