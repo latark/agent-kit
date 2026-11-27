@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "head": "2f3396f3",
+  "head": "3ba3aed0",
   "python": "3.14",
   "hashes": {
     "guard/test_agents_after.py": "db8a044f29083840209e6c6d9b8018ea6098231b66c3d31cf843ab668997e943",
@@ -154,7 +154,7 @@
     "pantheon/test_outside_rerun.py": "b4785916a2ebcc23a0aec6c0fcdc8f9806fe6312e6cffe6335d43d2bc334812c",
     "pantheon/test_outside_secret.py": "c6421f45eb3dabf8f777418c34f3df65f450491ffa2f256a89516a21527cb262",
     "pantheon/test_outside_stop.py": "f5bc1b0637d7e5b82d657786b7a7c6277052f6fa58df41e02970cc174869370a",
-    "pantheon/test_outside_test_keys.py": "3ac4884be404a45b962853d5242d1bbb24fdde2d1e32a7dc48c47a022e33fdd7",
+    "pantheon/test_outside_test_keys.py": "ee9462b13812be4b16b13cc0fbf044920b0b225dbee5e09b970b74a5994a1c03",
     "pantheon/test_outside_tree.py": "9a9966bacddb04177687a11f87d738b6a8339a324683d0298dfe61198e725305",
     "pantheon/test_owner_cap.py": "e2a32d075fd63d0bf07ac70150b91c00810c05df98dd9c12316fabf1237ded3c",
     "pantheon/test_owner_edit.py": "3cadc93e61aa9052e0edecc697701cf42be5491867c5bf5be7be482d74669771",
@@ -997,7 +997,7 @@
   },
   "sums": {
     ".claude-plugin/marketplace.json": "2d85737b88389ce7fd67d9b4bebc427dff0d94484e2105fe3f989a410bfc1a11",
-    ".claude-plugin/releases.json": "709b43f60af78ce745cb8787af1a77420c21be863041929c9fd3d514817fcc33",
+    ".claude-plugin/releases.json": "a6754d3c632d3930fdf4fb60c9b8178d4c41a8080ce764dcec328ed5d875fe77",
     ".github/ruff-requirements.txt": "067b86c8c007e2af54995b8aeef4d6c71542e445c7f2ee7246ee9f2c756464a3",
     ".github/scripts/release.py": "7c3a120f029aa7bb662d358889a4ff489ea298a014071a9c9ec71e2fab417dbe",
     ".github/scripts/test_release.py": "18e3a331da1a072c6791d93991d312b36e940c4be93eb379c2609d168d6df61f",
@@ -1100,7 +1100,7 @@
     "plugins/guard/tests/test_tg_self.py": "3ab61e310e650442e3dd261d4ee409b9fe311d4c780da1eb221749a3dd84691c",
     "plugins/guard/tests/test_worktree_cmd.py": "2fa5ce89eb5225493387c693f0ff7f801155debb8b3d835978e9e01a87c1a4cf",
     "plugins/guard/tests/test_worktree_own.py": "6f47a809118fb9ddebc09427d7ebea258e83ba32be29c7d4bd29826bafefaa6b",
-    "plugins/pantheon/.claude-plugin/plugin.json": "3a343ee871389be6ea53d7996285e6ec97c731f0af3c9fb4a317adde048ff241",
+    "plugins/pantheon/.claude-plugin/plugin.json": "3cfc3d4db0894e7cfa69762389530e71e24beee88768945fe39665a78381f46a",
     "plugins/pantheon/bin/heavy": "86beacc7de5f89704500f15a8e5139c81cfaba20aeaca29007399c48bdc50a4b",
     "plugins/pantheon/bin/pantheon": "fb57ba5992df6b6d75a913429ccdb7438bb5bd95301a95184f639d98b32a4220",
     "plugins/pantheon/bin/pantheon-setup": "cb5b2d9f88ead0eab3775567e122850fa324b92ef0e946d3019d718f4d89adab",
@@ -1405,7 +1405,7 @@
     "plugins/pantheon/tests/test_outside_rerun.py": "b4785916a2ebcc23a0aec6c0fcdc8f9806fe6312e6cffe6335d43d2bc334812c",
     "plugins/pantheon/tests/test_outside_secret.py": "c6421f45eb3dabf8f777418c34f3df65f450491ffa2f256a89516a21527cb262",
     "plugins/pantheon/tests/test_outside_stop.py": "f5bc1b0637d7e5b82d657786b7a7c6277052f6fa58df41e02970cc174869370a",
-    "plugins/pantheon/tests/test_outside_test_keys.py": "3ac4884be404a45b962853d5242d1bbb24fdde2d1e32a7dc48c47a022e33fdd7",
+    "plugins/pantheon/tests/test_outside_test_keys.py": "ee9462b13812be4b16b13cc0fbf044920b0b225dbee5e09b970b74a5994a1c03",
     "plugins/pantheon/tests/test_outside_tree.py": "9a9966bacddb04177687a11f87d738b6a8339a324683d0298dfe61198e725305",
     "plugins/pantheon/tests/test_owner_cap.py": "e2a32d075fd63d0bf07ac70150b91c00810c05df98dd9c12316fabf1237ded3c",
     "plugins/pantheon/tests/test_owner_edit.py": "3cadc93e61aa9052e0edecc697701cf42be5491867c5bf5be7be482d74669771",
