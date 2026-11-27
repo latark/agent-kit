@@ -288,5 +288,28 @@ w = World("no-repo")
 M.allowed_repos = lambda: {"latark/other"}
 check("agent-kit нет в merge_repos → ничего", RT.tick(T) is None and w.releases() == [])
 
+# --- [Н3, Н4 metis-0902] git прохода без ~/.gitconfig; репозиторий — только полное имя ------------------------------
+w = World("global-config")
+hooks = os.path.join(w.root, "evil-hooks")
+os.makedirs(hooks)
+HOOK_MARK = os.path.join(w.root, "hook-ran")
+for name in ("post-checkout", "post-merge", "reference-transaction"):
+    with open(os.path.join(hooks, name), "w") as fh:
+        fh.write(f'#!/bin/sh\ntouch "{HOOK_MARK}"\n')
+    os.chmod(os.path.join(hooks, name), 0o755)
+with open(os.path.join(w.root, "home", ".gitconfig"), "w") as fh:
+    fh.write(f"[core]\n\thooksPath = {hooks}\n")
+out = RT.tick(T)
+check("[T8] Н3: core.hooksPath из ~/.gitconfig владельца — хук в копии прохода не исполнен, выпуск идёт",
+      not os.path.exists(HOOK_MARK) and len(w.releases()) == 1, (out, os.path.exists(HOOK_MARK)))
+env = RT._env()
+check("[T8] Н3: git прохода — GIT_CONFIG_GLOBAL=/dev/null и GIT_CONFIG_NOSYSTEM=1",
+      env.get("GIT_CONFIG_GLOBAL") == os.devnull and env.get("GIT_CONFIG_NOSYSTEM") == "1", env)
+w = World("evil-name")
+M.allowed_repos = lambda: {"evil/agent-kit"}
+out = RT.tick(T)
+check("[T9] Н4: «evil/agent-kit» в merge_repos — не latark/agent-kit → ни клона, ни release.py",
+      out is None and w.releases() == [] and not os.path.exists(os.path.join(w.state, "release")), out)
+
 print(f"\n{len(CHECKS) - len(FAILS)}/{len(CHECKS)}")
 sys.exit(1 if FAILS else 0)
