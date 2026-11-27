@@ -139,8 +139,8 @@ except C.Refused as e:
     err = e
 check("walk: папку не прочесть — с errors строка и пусто, без errors — Refused",
       items == [] and errs == ["x/: не прочитана (OSError)"] and err is not None and "не прочитана" in str(err), (errs, err))
-mono, ticks, seen, errs = C.time.monotonic, [0], [], []
-C.time.monotonic = lambda: ticks.__setitem__(0, ticks[0] + 1) or ticks[0]
+mono, seen, errs = C.time.monotonic, [], []   # часы стоят, пока нет находки, и уходят за срок после первой
+C.time.monotonic = lambda: 1000 if seen else 0   # не зависит ни от порядка обхода, ни от числа чужих вызовов
 C.DEADLINE = 40
 C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
 C.DEADLINE, C.time.monotonic = None, mono
