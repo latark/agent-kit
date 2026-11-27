@@ -547,6 +547,74 @@ def test_autostart_backoff_and_give_up():
           f"снова встал через 3 дня при неснятой отметке — нет второй macOS: {st}")
 
 
+def _main_copy_case(setup, old=True):
+    """Основная копия <AI_HOME>/agent-kit во временной папке: main с коммитом c1, origin/main на один коммит впереди
+    (старый, если old). setup(g, root) готовит состояние. → (тревоги, голова до, голова после, origin/main)."""
+    import types
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import watch
+    home = mkroot("main-copy-")
+    root = os.path.join(home, "ai", "agent-kit")
+    os.makedirs(root)
+    date = "2020-01-01T00:00:00" if old else time.strftime("%Y-%m-%dT%H:%M:%S")
+    env = dict(os.environ, HOME=home, GIT_COMMITTER_DATE=date, GIT_AUTHOR_DATE=date)
+
+    def g(*a):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=root, capture_output=True,
+                              text=True, env=env, check=True).stdout.strip()
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "c1")
+    g("checkout", "-q", "-b", "tmp")
+    g("commit", "-q", "--allow-empty", "-m", "c2")
+    g("update-ref", "refs/remotes/origin/main", "tmp")
+    g("checkout", "-q", "main")
+    g("branch", "-q", "-D", "tmp")
+    setup(g, root)
+    before = g("rev-parse", "HEAD")
+    alerts = []
+    saved = watch.P
+    watch.set_core(types.SimpleNamespace(AI_HOME=os.path.join(home, "ai"), HOME=home, clear_once=lambda k: None,
+                                         alert_once=lambda k, v, text, who="pantheon", **kw: alerts.append((k, v, text))))
+    try:
+        watch.main_copy(time.time())
+    finally:
+        watch.set_core(saved)
+    return alerts, before, g("rev-parse", "HEAD"), g("rev-parse", "origin/main")
+
+
+def test_main_copy_detached_alert_1027():
+    """metis-1027: основная копия без ветки — тревога, копию не трогаем."""
+    alerts, before, after, _ = _main_copy_case(lambda g, root: g("checkout", "-q", "--detach", "HEAD"))
+    check(len(alerts) == 1 and "без ветки" in alerts[0][2], f"detached: нет тревоги: {alerts}")
+    check(before == after, "detached: копию сдвинули")
+
+
+def test_main_copy_clean_main_fast_forward_1027():
+    """metis-1027: чистая main отстаёт — сдвигается до origin/main сама, тревоги нет."""
+    alerts, before, after, om = _main_copy_case(lambda g, root: None)
+    check(after == om and before != om, f"чистая main не сдвинута: {before} {after} {om}")
+    check(not alerts, f"после сдвига тревога: {alerts}")
+
+
+def test_main_copy_dirty_alert_only_1027():
+    """metis-1027: в дереве правка — только тревога, ни сдвига, ни правки файла."""
+    def dirty(g, root):
+        open(os.path.join(root, "f.txt"), "w").write("x")
+        g("add", "f.txt")
+    alerts, before, after, om = _main_copy_case(dirty)
+    check(len(alerts) == 1 and "отстала" in alerts[0][2], f"грязная копия: нет тревоги: {alerts}")
+    check(before == after != om, "грязная копия: сдвинута")
+
+
+def test_main_copy_fresh_lag_no_alert_1027():
+    """metis-1027: грязная копия отстаёт меньше суток — молчим (тревога только после MAIN_COPY_LAG)."""
+    def dirty(g, root):
+        open(os.path.join(root, "f.txt"), "w").write("x")
+        g("add", "f.txt")
+    alerts, *_ = _main_copy_case(dirty, old=False)
+    check(not alerts, f"отставание меньше суток: тревога: {alerts}")
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(ROOT), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544)

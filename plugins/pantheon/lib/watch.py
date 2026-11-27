@@ -422,6 +422,7 @@ def _watch(dry=False):
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
+              ("основная копия agent-kit", lambda: main_copy(t)),
               ("кэши песочниц", lambda: sandbox_sweep(t)),
               ("версия Claude Code", lambda: cc_version(t)),
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
@@ -2019,6 +2020,51 @@ def worktrees(agents, registry, doms, t):
         P.alert_once("watch-wt-removed", today(t), f"уборка копий: убрано {len(removed)} — " + "; ".join(removed[:3])
                      + (f" и ещё {len(removed) - 3}" if len(removed) > 3 else "")
                      + f"; журнал дня — {wt_archive('removed-' + today(t) + '.txt').replace(P.HOME, '~')}", "watch")
+
+
+MAIN_COPY_LAG = 86400        # основная копия agent-kit отстала от origin/main дольше — тревога (metis-1027)
+
+
+def main_copy(t):
+    """Основная копия agent-kit (AI_HOME/agent-kit) не должна стоять без ветки или отставать от origin/main (metis-1027:
+    неделя detached с 02.11). Без сети: берётся уже имеющийся origin/main. Чистое дерево на main — `merge --ff-only`
+    сам; иначе (detached, другая ветка, грязно, ff не вышел) — тревога один раз на состояние и ничего не трогаем:
+    detached — сразу, отставание — когда старейший недостающий коммит старше MAIN_COPY_LAG."""
+    root = os.path.join(P.AI_HOME, "agent-kit")
+    if not os.path.exists(os.path.join(root, ".git")):
+        return
+    short = root.replace(P.HOME, "~")
+    key = "watch-main-copy"
+    head = _git("-C", root, "symbolic-ref", "-q", "--short", "HEAD")
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    if not branch:
+        P.alert_once(key, "detached", f"основная копия {short} без ветки (detached HEAD) — Метиде: вернуть main и "
+                     "сдвинуть до origin/main; сам дежурный её не трогает", "watch")
+        return
+    if _git("-C", root, "rev-parse", "-q", "--verify", "origin/main^{commit}").returncode != 0:
+        return
+    lag = _git("-C", root, "log", "--reverse", "--format=%ct", "HEAD..origin/main")
+    stamps = lag.stdout.split() if lag.returncode == 0 else []
+    if not stamps:
+        P.clear_once(key)
+        return
+    clean = _git("-C", root, "status", "--porcelain")
+    if branch == "main" and clean.returncode == 0 and not clean.stdout.strip():
+        if _git("-C", root, "merge", "--ff-only", "origin/main").returncode == 0:
+            P.clear_once(key)
+            return
+        why = "fast-forward не вышел (у main есть свои коммиты)"
+    elif branch != "main":
+        why = f"стоит на ветке {branch}"
+    else:
+        why = "в дереве есть правки"
+    try:
+        age = t - int(stamps[0])
+    except ValueError:
+        return
+    if age > MAIN_COPY_LAG:
+        P.alert_once(key, f"lag-{branch}", f"основная копия {short} отстала от origin/main на {len(stamps)} коммит. "
+                     f"({age / 86400:.0f} дн.): {why} — Метиде: сдвинуть вручную", "watch")
 
 
 def _find_copy(path, roots):
