@@ -129,10 +129,14 @@ if not getattr(sys, "_rt_hooked", False):
             cands = [args[0], *(a if isinstance(a, (list, tuple)) else [a])]
             cwd = args[2] if len(args) > 2 else None
             if cwd is not None and not isinstance(cwd, int):
+                # cwd не раскрыть (текущая папка удалена, странный тип) — запасной путь как без cwd=: аргументы процесса
+                # не теряем (metis-1390, Д2 #552), абсолютные пути пишутся, относительные _rt_rel отбросит сам
                 try:
-                    base = os.path.join(os.getcwd(), os.fsdecode(cwd))
+                    base = os.fsdecode(cwd)
+                    if not os.path.isabs(base):
+                        base = os.path.join(os.getcwd(), base)
                 except Exception:
-                    return
+                    base = None
         elif ev in ("os.exec", "os.posix_spawn"):
             a = args[1] if len(args) > 1 else ()
             cands = [args[0], *(a if isinstance(a, (list, tuple)) else [a])]
