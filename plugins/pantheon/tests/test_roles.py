@@ -177,17 +177,17 @@ def check_plan10(texts, flat, callers):
     miss = [f for f in callers if f != "hq.md" and rec not in flat.get(f, "")]
     check("координатор и лиды: запись тестов вне ядра — outside test --affected, полный — ядро и пачки"
           + (f" (нет у: {miss})" if miss else ""), not miss)
-    # hq: prometheus на глубокой теме — Fable, исключения Fable названы (второй argus #426, Д1)
+    # hq: prometheus на глубокой теме — Fable, Fable — только глубокая тема prometheus, momus — Opus (второй argus #426, Д1)
     hq_rules = ("глубокая тема (много источников, вывод меняет решение владельца) — вызов prometheus с "
                 "`model: \"fable\"` (решение 10.11);",
-                "Fable — решения владельца 10.11: momus на Fable medium из файла роли и prometheus на глубокой теме — "
-                "вызов с `model: \"fable\"`; другой роли — только решением владельца.")
+                "Fable — только prometheus на глубокой теме (решение владельца 10.11), вызов с `model: \"fable\"`; "
+                "momus — Opus medium из файла роли (решение владельца 27.11, metis-1374); другой роли — только решением владельца.")
     miss = [x[:50] for x in hq_rules if x not in flat.get("hq.md", "")]
-    check("hq.md: prometheus на глубокой теме — Fable, исключения Fable — momus и prometheus"
+    check("hq.md: Fable — только глубокая тема prometheus, momus — Opus"
           + (f" (нет: {miss})" if miss else ""), not miss)
     # hq: Fable не «после двух неудач Opus xhigh» — выше high не поднимать (план 1.0, раздел 6а; Д6 argus #426)
     hq = flat.get("hq.md", "")
-    check("hq.md: выше high не поднимать, Fable — momus и глубокая тема prometheus, нет xhigh",
+    check("hq.md: выше high не поднимать, Fable — только глубокая тема prometheus, momus — Opus, нет xhigh",
           "xhigh" not in hq and "Effort выше high не поднимай (план 1.0, раздел 6а): не справляется — сначала "
           "проверка своей работы, потом effort на ступень выше, потом модель старше." in hq
           and "другой роли — только решением владельца." in hq)
