@@ -530,9 +530,10 @@ except (OSError, ValueError):
 check("карта: упавшие при сборке файлы (broken) — среди тестов карты и идут всегда",
       set(RAWMAP.get("broken") or ()) <= amap["tests"] & amap["always"], RAWMAP.get("broken"))
 # metis-0791: правка bin/heavy — только тесты, что его запускают; линтер словаря читает heavy, но он в readers
+# 16 — после разреза тестов heavy на test_heavy_full/outside/queue (27.11)
 HEAVY = amap["files"].get("plugins/pantheon/bin/heavy", set())
-check("карта: bin/heavy → test_heavy_queue, не больше 12 тестов, без линтеров и test_watch (было 33)",
-      "pantheon/test_heavy_queue.py" in HEAVY and len(HEAVY) <= 12
+check("карта: bin/heavy → test_heavy_queue, не больше 16 тестов, без линтеров и test_watch (было 33)",
+      "pantheon/test_heavy_queue.py" in HEAVY and len(HEAVY) <= 16
       and not HEAVY & {"pantheon/test_glossary.py", "pantheon/test_watch.py"}, sorted(HEAVY))
 check("карта: readers — test_glossary (читает дерево), идёт всегда",
       "pantheon/test_glossary.py" in (RAWMAP.get("readers") or ()) and "pantheon/test_glossary.py" in amap["always"],
@@ -544,7 +545,7 @@ gone = sorted(p for p in R.FULL if not os.path.isfile(os.path.join(REPO, p)))
 check("FULL: только существующие файлы", not gone, gone)
 # карта по прогону видит ленивую загрузку: watch.py грузит pantheon.py по требованию, по тексту test_tick его не зовёт
 for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
-                 ("plugins/guard/hooks/guard.py", "guard/test_guard.py"),
+                 ("plugins/guard/hooks/guard.py", "guard/test_guard_hooks.py"),
                  ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate_ci.py"),
                  ("plugins/project-tools/lib/project_tools.py", "project-tools/test_project_tools.py")):
     check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()),
@@ -1050,6 +1051,11 @@ put(os.path.join(ma, "tests", "test_cscript.py"), HDR + "subprocess.run([sys.exe
     "x = 1\\n'], cwd=P, check=True)\nsubprocess.run([sys.executable, '-I', '-c', 'pass', ''], cwd=P, check=True)\n" + OK2)
 put(os.path.join(ma, "tests", "test_rmtree.py"), HDR + "t = tempfile.mkdtemp()\nos.makedirs(os.path.join(t, 'lib', "
     "'tree'))\nopen(os.path.join(t, 'lib', 'x.py'), 'w').close()\nos.chdir(P)\nshutil.rmtree(t)\n" + OK2)
+# metis-1390: относительный аргумент процесса — от его cwd=, а не от папки теста: «.» во временной папке не связывает
+# тест со всем плагином, «rel.txt» при cwd=lib — связывает с lib/rel.txt
+put(os.path.join(ma, "lib", "rel.txt"), "rel\n")
+put(os.path.join(ma, "tests", "test_dotcwd.py"), HDR + "subprocess.run(['/bin/sh', '-c', ':', '.'], cwd=tempfile.mkdtemp(), "
+    "check=True)\nsubprocess.run(['/bin/sh', '-c', ':', 'rel.txt'], cwd=os.path.join(P, 'lib'), check=True)\n" + OK2)
 # читает дерево: открывает 25 файлов из пяти папок (порог — 20 из 5), ничего из них не запуская; s.sh запускает — эта
 # связь остаётся. test_fewdirs — 20 файлов из четырёх папок, test_thin — 15 из пяти: обычные тесты, связи остаются
 READ_DIRS = ("docs/a", "docs/b", "docs/c", "docs/d", "docs/e")
@@ -1097,6 +1103,7 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/mods/d0/m00.py", {"alpha/test_loader.py"}),
                    ("plugins/alpha/mods/d4/m43.py", {"alpha/test_loader.py"}),
                    ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
+                   ("plugins/alpha/lib/rel.txt", {"alpha/test_dotcwd.py"}),
                    ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
                    ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
                    ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
@@ -1112,6 +1119,9 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
 for lb in ("alpha/test_cscript.py", "alpha/test_rmtree.py"):
     got = sorted(p for p, v in F.items() if lb in v and not p.startswith("plugins/alpha/tests/"))
     check(f"affected-map: {lb} не задевает файлов плагина", got == [], got)
+got = sorted(p for p, v in F.items() if "alpha/test_dotcwd.py" in v and not p.startswith("plugins/alpha/tests/"))
+check("affected-map: «.» и «rel.txt» — от cwd= процесса: test_dotcwd задевает только lib/rel.txt (metis-1390)",
+      got == ["plugins/alpha/lib/rel.txt"], got)
 with open(mout, encoding="utf-8") as fh:
     RAW = json.load(fh)
 check("affected-map: readers — только читающий дерево (25 файлов из 5 папок); 20 из 4 и 15 из 5 — нет",
@@ -1123,7 +1133,7 @@ check("affected-map: version 3, hashes — sha256 каждого файла те
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
     "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py", "alpha/test_cscript.py", "alpha/test_rmtree.py",
-    "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
+    "alpha/test_dotcwd.py", "alpha/test_reader.py", "alpha/test_fewdirs.py", "alpha/test_thin.py", "alpha/test_loader.py"} and RAW.get("broken") == ["alpha/test_fail.py"],
       mm)
 with open(os.path.join(ma, "lib", "x.py")) as fh:
     check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')

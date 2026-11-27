@@ -217,7 +217,7 @@ def auto_mode(auto_allow):
 # ${CLAUDE_PLUGIN_ROOT}; это in_repo.py пакета (скрипт репозитория по эталону хеша), до его «--» — репозиторий и только
 # флаги обёртки, а за «--» — только bash .claude/hooks/<имя>, python3 -I .claude/hooks/<имя> или
 # python3 -I ${CLAUDE_PLUGIN_ROOT}/../_bin/<имя>.py (pack_hook_problem). Сервер MCP — только через env_from.py пакета, а
-# за его «--» — только npx -y <пакет>@x.y.z: программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
+# за его «--» — только npx -y <пакет>@x.y.z, а имена из .env до «--» — по правилам env (metis-1223): программа по пути вне песочницы окна исполнила бы и скрипт или бинарь из
 # папки, которую окно пишет; http, sse и ws — без headersHelper. Поля plugin.json, которые сами запускают код мимо
 # hooks.json, запрещены. Бинарь из ${HOME}/.local/bin за «--» — только по имени из PACK_LOCAL_BINS (metis-1222, слово
 # владельца 15.11): окна в ~/.local не пишут, а список, а не вся папка, — потому что uvx, claude и pantheon оттуда
@@ -305,6 +305,14 @@ def pack_server_problem(s):
     if (s["command"] != "python3" or not isinstance(args, list) or args[:2] != PACK_MCP_PREFIX or "--" not in args
             or not all(isinstance(a, str) for a in args)):
         return f"не через env_from.py пакета (python3 -I {PACK_BIN_MARK}/env_from.py … -- <команда>): {s['command']} {args}"[:240]
+    # имена из .env до «--» (env_from.py [--chdir <папка>] <.env> <ИМЯ>[,<ИМЯ>…]) — те же правила, что у env: иначе
+    # DYLD_INSERT_LIBRARIES или NODE_OPTIONS из .env дошли бы до сервера вне песочницы (metis-1223)
+    pre = args[2:args.index("--")]
+    if pre[:1] == ["--chdir"]:
+        pre = pre[2:]
+    names = [n for n in pre[1].split(",") if n] if len(pre) == 2 else []
+    if wrong := [n for n in names if not PACK_ENV_NAME.fullmatch(n) or PACK_ENV_DENY.fullmatch(n)]:
+        return f"имена из .env — только свои, без PATH, HOME, DYLD_*, NODE_*, PYTHON* и подобных: {','.join(wrong)}"[:200]
     run = args[args.index("--") + 1:]
     if (run[:2] == ["npx", "-y"] and len(run) > 2 and NPX_PINNED.fullmatch(run[2])) or (run[:1] and run[0] in PACK_LOCAL_RUN):
         return None

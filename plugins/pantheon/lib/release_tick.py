@@ -22,6 +22,8 @@ git-credential` (push под входом gh владельца).
 
 Итог — одна строка `<время> release-tick: …` в logs/tick.log, когда итог сменился или был запуск. Сбой (клон, fetch,
 gh, код release.py не 0) — тревога alert_once без critical, одна на состояние; удачная проверка её снимает.
+Репозиторий — только полное имя из REPOS (latark/agent-kit), git — без ~/.gitconfig и системного config
+(GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM=1, metis-0902 Н3, Н4).
 PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
 """
 import os
@@ -36,7 +38,7 @@ MERGE_AGE = 15 * 60
 RELEASE_PREFIX = "выпуск: "  # тема коммита release.py
 RELEASE_SCRIPT = os.path.join(".github", "scripts", "release.py")
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
-REPO_NAMES = ("agent-kit",)  # имя репозитория без владельца: у него есть release.py
+REPOS = ("latark/agent-kit",)  # полное имя owner/repo (Н4 metis-0902): чужой «*/agent-kit» из merge_repos не берём
 URL = "https://github.com/{repo}.git"  # тесты подменяют на локальный голый репозиторий
 LOG_DEPTH = 200
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -61,12 +63,14 @@ def copy_dir(repo):
 
 
 def repos():
-    return sorted(r for r in P.merge_mod().allowed_repos() if r.rsplit("/", 1)[-1] in REPO_NAMES)
+    return sorted(r for r in P.merge_mod().allowed_repos() if r in REPOS)
 
 
 def _env():
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(HOME=P.HOME, PATH=P.merge_mod().SAFE_PATH, GIT_TERMINAL_PROMPT="0")
+    # Н3 metis-0902: ни ~/.gitconfig, ни системный config (core.hooksPath, fsmonitor) в git прохода не попадают
+    env.update(HOME=P.HOME, PATH=P.merge_mod().SAFE_PATH, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_CONFIG_NOSYSTEM="1")
     return env
 
 
@@ -246,7 +250,7 @@ def log(t, text):
 
 
 def tick(t):
-    """Проход тика: не чаще CHECK_EVERY, по одному репозиторию из REPO_NAMES. → итог или None (пропуск)."""
+    """Проход тика: не чаще CHECK_EVERY, по одному репозиторию из REPOS. → итог или None (пропуск)."""
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         return None
     st = P.read_json(state_file(), {})
