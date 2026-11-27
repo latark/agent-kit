@@ -9,8 +9,8 @@
 - 1384: срок задачи check не ниже TIMEOUT_FLOOR, как бы ни стоял timeout в schedule.toml;
 - 1385: тревога о длинных CLAUDE.md не повторяется при каждом изменении числа строк.
 Мутанты внутри теста (подмена исходника в копии lib/): без счётчика серии, без свёртки inbox, без пола срока, без
-свёртки инструкций, без повтора gh, сброс серии при count=False (metis-1402, 1406) — набор
-краснеет.
+свёртки инструкций, без повтора gh, сброс серии при count=False (metis-1402, 1406), 403 как сетевой сбой (metis-1407)
+— набор краснеет.
 """
 import importlib
 import importlib.util
@@ -89,6 +89,14 @@ def streak_cases(P, out):
         all(P.net_error(x) for x in (EOF_ERR, TLS_ERR, "net/http: TLS handshake timeout"))
         and not P.net_error("Could not resolve to a Repository with the name x")
         and not P.net_error("gh вернул не JSON"), None)
+    auth = ("fatal: unable to access 'https://github.com/x/y/': The requested URL returned error: 403",
+            "gh: HTTP 403: Resource not accessible by integration (https://api.github.com/graphql)",
+            "fatal: Authentication failed for 'https://github.com/x/y/'")
+    out("net_error: отказ авторизации 403/401 — не сетевой, даже с «unable to access» (metis-1407)",
+        not any(P.net_error(x) for x in auth), [x for x in auth if P.net_error(x)])
+    P.alert_net("auth", "fetch: " + auth[0], "выпуск без Actions: 403", "pantheon-tick")
+    out("alert_net: 403 — тревога с первого прохода, а не с третьего (metis-1407)",
+        len(lines(P, "выпуск без Actions: 403")) == 1, lines(P, "403"))
 
 
 def autoclose_cases(P, out):
@@ -222,6 +230,7 @@ MUTANTS = {
     "без повтора gh": ("autoclose.py", "for attempt in (0, 1):", "for attempt in (1,):"),
     "net_error всегда нет": ("pantheon.py", "return bool(NET_ERR_RE.search(str(text)))", "return False"),
     "count=False сбрасывает серию": ("pantheon.py", "if c and count:", "if c:"),  # metis-1402, 1406
+    "403 — сетевой сбой": ("pantheon.py", " and not AUTH_ERR_RE.search(str(text))", ""),  # metis-1407
 }
 
 

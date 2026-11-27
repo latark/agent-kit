@@ -918,11 +918,16 @@ def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
 ALERT_STREAK = 3  # сбоев сети подряд (проходов), после которых тревога пишется (metis-1381, 1386)
 NET_ERR_RE = re.compile(r"unexpected EOF|\bEOF\b|TLS handshake|SSL_ERROR|unable to access|Could not resolve host|timed out|"
                         r"TimeoutExpired|i/o timeout|Connection (?:reset|refused)|\bHTTP 50[234]\b", re.I)
+# metis-1407: отказ авторизации — постоянный сбой, а не сеть: git пишет его как «unable to access …: The requested URL
+# returned error: 403», и без этого исключения тревога шла бы лишь с третьего прохода и раз в сутки
+AUTH_ERR_RE = re.compile(r"returned error: 40[13]\b|\bHTTP 40[13]\b|Authentication failed|Bad credentials|"
+                         r"could not read Username|Permission denied", re.I)
 
 
 def net_error(text):
-    """Текст сбоя — разовая неполадка сети (EOF, TLS, таймаут, unable to access), а не ошибка в данных или коде."""
-    return bool(NET_ERR_RE.search(str(text)))
+    """Текст сбоя — разовая неполадка сети (EOF, TLS, таймаут, unable to access), а не ошибка в данных или коде.
+    Отказ авторизации (401, 403, Authentication failed) — не сетевой, даже рядом с «unable to access» (metis-1407)."""
+    return bool(NET_ERR_RE.search(str(text))) and not AUTH_ERR_RE.search(str(text))
 
 
 def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
