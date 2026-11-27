@@ -289,7 +289,11 @@ for label, word, (setup, undo) in (
     check(f"{label}: полный набор вместо узкого — команда без --affected, итог без base, narrow_why «{word}»",
           ncalls() == n0 + 1 and last_cmd()[-1] == LINE and "base" not in rx and word in rx.get("narrow_why", "")
           and rx.get("code") == 0 and rx.get("record"), rx)
-    check(f"{label}: итог running несёт merge-base заявки (metis-0855 Д3), хотя base нет", _mb and set(_mb) == {B0}, _mb)
+    # info/grafts подрезает родителей F3 — git merge-base честно отвечает «общего предка нет», и mb=None (не посчитан) верен;
+    # shallow и refs/replace merge-base не меняют — там B0
+    _want = None if word == "info/grafts" else B0
+    check(f"{label}: итог running несёт merge-base заявки (metis-0855 Д3), хотя base нет"
+          + (" — при grafts git его не находит, None" if _want is None else ""), _mb and set(_mb) == {_want}, _mb)
     check(f"{label}: live_test — тот же mb сцепляет с идущим, другая — нет",
           _live_mb(hx, M1, B0) and not _live_mb(hx, M1, F1), (hx, M1, B0))
     check(f"{label}: запись полная (без --affected) — её шлюз засчитает и ядру; status называет причину",
