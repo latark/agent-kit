@@ -5454,6 +5454,29 @@ def hard(check, *args):
                           "проще.", logged=True) from e
 
 
+def _post_bash(event):
+    """PostToolUse Bash хука плагина: журнал шлюза слияния, затем роли проекта после хода (metis-0883) — файл
+    .claude/agents своей папки, изменённый командой мимо Write/Edit, судит тот же _text_risk; находка — decision
+    block с причиной агенту. Сбой этой проверки — в журнал сбоев: команда уже выполнена, ход не ломаем."""
+    if "push" not in OFF:
+        try:
+            _mg().record(event)
+        except Exception as e:
+            log_failure("record", e)
+            raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
+                              "выполнена, но её запись (тесты или вердикт) шлюз слияния не увидит. Повтори команду или "
+                              "сообщи координатору.", logged=True) from e
+    if "protect-config" not in OFF:
+        try:
+            found = protect_config.agents_after(event)
+        except Exception as e:
+            log_failure("agents_after", e)
+            found = None
+        if found:
+            print(json.dumps({"decision": "block", "reason": protect_config.agents_after_reason(found)},
+                             ensure_ascii=False))
+
+
 def main(raw=None):
     """raw — байты события, уже прочитанные входом guard.py; None — прочитать stdin."""
     global EVENT_NAME
@@ -5476,17 +5499,12 @@ def main(raw=None):
         # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего.
         # Сбой записи — код 2: команда уже выполнена, Claude Code только показывает причину агенту (metis-0094)
         # merge_gate.record судит только Bash: остальные инструменты — без загрузки merge_gate.py (metis-0330)
-        if MODE == "plugin" and "push" not in OFF and event.get("tool_name") == "Bash":
-            try:
-                _mg().record(event)
-            except Exception as e:
-                log_failure("record", e)
-                raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
-                                  "выполнена, но её запись (тесты или вердикт) шлюз слияния не увидит. Повтори команду или "
-                                  "сообщи координатору.", logged=True) from e
+        if MODE == "plugin" and event.get("tool_name") == "Bash":
+            _post_bash(event)
         return
     tool = event.get("tool_name") if name == "PreToolUse" else None
-    if MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and managed_guard_active():
+    if (MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and os.environ.get("GUARD_BRANCH") != "1"
+            and managed_guard_active()):  # GUARD_BRANCH=1 — проба guard ветки (metis-1227), см. guard.quiet
         # ту же проверку уже делает хук из управляемых настроек; Agent, Task и Skill они guard не передают
         # (matcher Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch) — их проверяет плагин
         return

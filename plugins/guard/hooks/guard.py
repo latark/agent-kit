@@ -19,6 +19,7 @@
      вызов инструмента в сессии проверяют все копии: метки ещё нет. Сессии без строгого guard (ваша, вложенный
      claude, `claude -r` без окна) метки своей сессии не имеют. Метку строгий guard обновляет на каждом вызове; не
      обновлял STRICT_FRESH (10 мин) — хук плагина снова проверяет сам.
+GUARD_BRANCH=1 (проба ветки через --plugin-dir, metis-1227): плагин не молчит, проверяет вместе с остальными копиями.
 Сбой этого решения (метку не прочесть, не записать) — не молчать: полная проверка, как раньше.
 
 Сбой загрузки правил (нет guard_rules.py, protect_config.py или merge_gate.py, ошибка в модуле) — код 2 с причиной, на
@@ -180,7 +181,7 @@ def strict_covers(event):
 def quiet(event, mode):
     """Хуку плагина молчать (код 0 без проверки): его проверку делает другая копия. Управляемая копия (--managed) и
     строгая (--strict) не молчат никогда."""
-    if mode != "plugin":
+    if mode != "plugin" or os.environ.get("GUARD_BRANCH") == "1":
         return False
     name = event.get("hook_event_name")
     tool = event.get("tool_name") if name == "PreToolUse" else None
