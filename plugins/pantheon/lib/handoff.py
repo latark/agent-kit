@@ -38,18 +38,22 @@
 Окно Touch ID (одно действие, один раз, по хешу текста):
   1. Роль пишет заявку: вид, цель, задача, зачем. Заявка из окна роли — в handoff/ рядом с PANTHEON_TMP (кэш окна, туда
      окно пишет само), вне окна — STATE/handoff/queue. Кто просит — имя окна по месту папки заявки (не из текста) и
-     роль со слов заявки. Текст окна собирает describe() из живых фактов: путь, ветка и HEAD worktree, хеш deploy.sh
-     и ветка origin, где есть HEAD, порт демона. Факты не те (коммит только здесь, ссылка, путь вне ~/projects, чужой
-     gitdir, HEAD не слит) — отказ сразу.
+     роль со слов заявки. Текст окна собирает describe() из живых фактов: путь, ветка и HEAD worktree, коммит main
+     и хеш deploy.sh, порт демона. Факты не те (коммит только здесь, ссылка, путь вне ~/projects, чужой gitdir, коммит
+     не в main по ответу GitHub, GitHub не ответил) — отказ сразу.
      git у владельца идёт вне песочницы и config роли не читает: частный GIT_DIR в STATE (свой config, копия HEAD,
      refs и объекты роли — только как данные), глобальный и системный config выключены, защитные ключи — через
      GIT_CONFIG_COUNT (private_git). Config роли — копией байтов через `git config --file --no-includes`; ключ вне
      белого списка GIT_KEYS_OK — отказ. До вопроса — только чтение объектов (rev-parse, cat-file, ls-tree,
      for-each-ref); status с неотслеживаемыми — после пальца, до действия. deploy — только основная копия (не
-     worktree, не .claude/, не кэш окна) и только слитый HEAD: он есть в ветке по умолчанию origin (цель
-     refs/remotes/origin/HEAD, без неё — main, потом master) по уже известным ссылкам, без fetch; не слит или
-     ссылки нет — отказ «только шлюз», окно показывает «HEAD … есть в origin/<ветка>». Исполняются байты deploy.sh из
-     коммита HEAD (`cat-file blob`), чей хеш показан, через bash -s; дерево проверяется до и после запуска.
+     worktree, не .claude/, не кэш окна), и из неё берутся только HEAD и remote.origin.url (GitHub owner/repo) как
+     данные. Коммит HEAD должен быть в main по живому ответу GitHub (metis-0902): fetch ветки по умолчанию в свою копию
+     STATE/handoff/deploy/<owner>__<repo> и `merge-base --is-ancestor` с FETCH_HEAD; ссылкам refs/remotes клона роли
+     не верим. Не предок — отказ «только шлюз»; fetch упал — отказ, до окна (fail-closed). Старый коммит main (откат)
+     годится. Окно: «выложить … на коммите <sha> из main <repo>». После пальца своя копия ставится на коммит
+     (checkout -f, reset --hard, clean -ffdx; status с игнорируемыми пуст), зависимости ставит она сама, ключи — только
+     STATE/outside/env (dev_keys outside), и исполняются байты deploy.sh этого коммита (хеш показан) через bash -s с
+     cwd = своя копия. Дерево, индекс и node_modules роли в выкладке не участвуют.
   2. Проход (тик, вне окна): заявка старше REQ_TTL — снята. Текст собирается заново; не равен тексту заявки — снята
      («изменилось с заявки — новая заявка»). Владелец не у Mac (простой больше PRESENT_SEC) — ждёт.
   3. Окно Touch ID — помощник слияния (merge.ask, lib/touchid.swift; merge.py не правится). Текст окна — ровно этот
@@ -490,7 +494,7 @@ def private_git(p):
             for k in GIT_KEYS_COPY:
                 if keys.get(k) in ("true", "false"):
                     fh.write(f"\t{k.split('.')[1]} = {keys[k]}\n")
-        yield {"gd": gd, "common": common, "env": env, "dir": tmp}
+        yield {"gd": gd, "common": common, "env": env, "dir": tmp, "keys": keys}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -565,36 +569,64 @@ def facts_worktree(target):
                         "с незакоммиченным не удалю)"}
 
 
-ORIGIN_REFS = "refs/remotes/origin/"
+DEPLOY_URL = "https://github.com/{repo}.git"   # тесты подменяют на локальный голый репозиторий
+GITHUB_RE = re.compile(r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+                       r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?")
+HEX40 = re.compile(r"[0-9a-f]{40}")
+FETCH_TIMEOUT = 300
 
 
-def merged_into(g, head):
-    """Ветка по умолчанию origin, в которой есть head, — по уже известным ссылкам (без fetch). Ветка — цель
-    refs/remotes/origin/HEAD, без неё — main, потом master. Цель origin/HEAD висит — git её не перечисляет, и ветка
-    тоже main или master. Ссылки нет или head в ней нет — Refuse("merge")."""
-    refs = {}
-    for line in gitc(g, ["for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/origin"]).splitlines():
-        name, _, sym = line.partition(" ")
-        refs[name] = sym
-    sym = refs.get(ORIGIN_REFS + "HEAD") or ""
-    if sym:
-        base = sym[len(ORIGIN_REFS):] if sym.startswith(ORIGIN_REFS) else ""
-    else:
-        base = next((b for b in ("main", "master") if ORIGIN_REFS + b in refs), "")
-    if not base:
-        raise Refuse("merge", "нет ссылки origin на ветку по умолчанию (origin/HEAD, origin/main, origin/master) — не "
-                              "видно, слит ли HEAD: deploy только слитого через шлюз")
-    ref = ORIGIN_REFS + base
-    if ref not in gitc(g, ["for-each-ref", "--contains", head, "--format=%(refname)", ref]).splitlines():
-        raise Refuse("merge", f"HEAD {head[:7]} не слит в origin/{base} — deploy только слитого через шлюз: сначала "
-                              "PR и слияние")
-    return base
+def github_repo(url):
+    """owner/repo из remote.origin.url основной копии (.git/config окну роли закрыт на запись); не GitHub — отказ."""
+    m = GITHUB_RE.fullmatch(url or "")
+    if not m or m.group(2).strip(".") == "":
+        raise Refuse("bad", "remote origin — не репозиторий GitHub: deploy только коммита из main по ответу GitHub")
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+def deploy_copy(repo):
+    """Своя копия STATE/handoff/deploy/<owner>__<repo> → (папка, env git): config свой, объекты — только с GitHub,
+    объекты и ссылки роли сюда не подключаются (metis-0902)."""
+    d = state("handoff", "deploy", repo.replace("/", "__"))
+    if not os.path.isdir(os.path.join(d, ".git")):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        run_git(["init", "-q", "--template=", d], git_env(), os.path.dirname(d))
+    gd = os.path.join(d, ".git")
+    return d, git_env(gd, GIT_WORK_TREE=d, GIT_INDEX_FILE=os.path.join(gd, "index"))
+
+
+def fetch_main(repo, d, env):
+    """Живой ответ GitHub: fetch ветки по умолчанию (HEAD) в свою копию → sha вершины. Сбой — отказ до окна."""
+    gh = P.merge_mod().gh_path() if P is not None else "gh"
+    try:
+        run_git(["-c", "credential.helper=", "-c", f"credential.helper=!{gh} auth git-credential", "fetch", "-q",
+                 "--no-tags", DEPLOY_URL.format(repo=repo), "HEAD"], env, d, FETCH_TIMEOUT)
+        tip = run_git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"], env, d).decode("utf-8", "replace").strip()
+    except (Refuse, OSError, subprocess.SubprocessError) as e:
+        raise Refuse("bad", f"GitHub не ответил о main {repo} ({str(e)[:120]}) — без живого ответа deploy не "
+                            "идёт") from None
+    if not HEX40.fullmatch(tip):
+        raise Refuse("bad", f"GitHub не дал вершину main {repo}")
+    return tip
+
+
+def in_main(repo, d, env, head, tip):
+    """head — предок вершины main с GitHub (merge-base --is-ancestor в своей копии). Ссылки клона роли не смотрим."""
+    try:
+        r = subprocess.run(["git", "--no-optional-locks", "merge-base", "--is-ancestor", head, tip], cwd=d, env=env,
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Refuse("bad", f"git merge-base не ответил: {type(e).__name__}") from None
+    if r.returncode != 0:
+        raise Refuse("merge", f"коммит {head[:12]} не в main {repo} по ответу GitHub — deploy только слитого через "
+                              "шлюз: сначала PR и слияние")
 
 
 def facts_deploy(target):
-    """Выкладка: основная копия (не worktree, не .claude/ и не кэш окна); HEAD слит в ветку по умолчанию origin
-    (merged_into); deploy.sh — байты из коммита HEAD (`git cat-file blob`), обычный файл в дереве. Исполняются ровно
-    они (exec_deploy, bash -s)."""
+    """Выкладка: основная копия (не worktree, не .claude/ и не кэш окна) — откуда HEAD и remote origin, только как
+    данные. Коммит HEAD должен быть в main по живому ответу GitHub (fetch в свою копию STATE и
+    merge-base --is-ancestor с FETCH_HEAD, fail-closed); deploy.sh — байты этого коммита из своей копии. Исполняет их
+    exec_deploy в своей копии на этом коммите, не в дереве роли (metis-0902)."""
     p = inside_projects(target)
     if "/.claude/" in p + "/" or p.startswith(caches() + "/"):
         raise Refuse("bad", "deploy — не из папки .claude/ и не из кэша окна роли")
@@ -602,18 +634,21 @@ def facts_deploy(target):
         if g["gd"] != g["common"]:
             raise Refuse("bad", "deploy — только из основной копии репозитория, не из worktree")
         head = gitc(g, ["rev-parse", "--verify", "HEAD^{commit}"])
-        base = merged_into(g, head)
-        tree = gitc(g, ["ls-tree", head, "--", "deploy.sh"])
-        if not re.match(r"100(?:644|755) blob [0-9a-f]{40}\tdeploy\.sh$", tree):
-            raise Refuse("bad", "в коммите HEAD нет deploy.sh обычным файлом")
-        data = run_git(["cat-file", "blob", f"{head}:deploy.sh"], g["env"], g["dir"])
-        if len(data) > SCRIPT_MAX:
-            raise Refuse("bad", "deploy.sh больше 1 МБ")
-        branch = gitc(g, ["rev-parse", "--abbrev-ref", "HEAD"])
+        repo = github_repo(g["keys"].get("remote.origin.url"))
+    if not HEX40.fullmatch(head):
+        raise Refuse("bad", "HEAD основной копии — не sha коммита")
+    d, env = deploy_copy(repo)
+    in_main(repo, d, env, head, fetch_main(repo, d, env))
+    tree = run_git(["ls-tree", head, "--", "deploy.sh"], env, d).decode("utf-8", "replace").strip()
+    if not re.match(r"100(?:644|755) blob [0-9a-f]{40}\tdeploy\.sh$", tree):
+        raise Refuse("bad", "в коммите HEAD нет deploy.sh обычным файлом")
+    data = run_git(["cat-file", "blob", f"{head}:deploy.sh"], env, d)
+    if len(data) > SCRIPT_MAX:
+        raise Refuse("bad", "deploy.sh больше 1 МБ")
     digest = hashlib.sha256(data).hexdigest()
-    return {"path": p, "head": head, "script": digest, "bytes": data,
-            "desc": f"выложить {tilde(p)}: deploy.sh {digest[:12]} из коммита, ветка {branch}, HEAD {head[:7]} есть "
-                    f"в origin/{base}"}
+    return {"path": p, "repo": repo, "copy": d, "head": head, "script": digest, "bytes": data,
+            "desc": f"выложить {tilde(p)} на коммите {head[:12]} из main {repo} (ответ GitHub): deploy.sh "
+                    f"{digest[:12]}, в своей копии, не в папке роли"}
 
 
 CDP_PORTS = {"comet": 9333, "chrome": 9334}   # = browser.BROWSERS (сверяет test_handoff)
@@ -669,33 +704,63 @@ def exec_worktree(req, facts):
     return f"worktree {tilde(p)} удалена"
 
 
+def deploy_deps(d, env, fh, log):
+    """Зависимости своей копии ставит она сама (`<pm> install --frozen-lockfile` или `npm ci`, как outside), а не
+    берёт node_modules роли. Нет package.json — ставить нечего."""
+    if P is None:
+        return
+    O = P.outside_mod()
+    pkg = O._pkg(d)
+    if not pkg:
+        return
+    pm = O.package_manager(d, pkg)
+    argv = [pm, "install", "--frozen-lockfile"] if pm in ("pnpm", "yarn") else [pm, "ci"]
+    fh.write(f"$ {' '.join(argv)}  (зависимости своей копии)\n")
+    fh.flush()
+    try:
+        r = subprocess.run(argv, cwd=d, env=env, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
+                           timeout=DEPLOY_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Refuse("bad", f"{pm} не запустился в своей копии ({type(e).__name__}), журнал {tilde(log)}") from None
+    if r.returncode != 0:
+        raise Refuse("bad", f"{pm} не поставил зависимости своей копии (код {r.returncode}), журнал {tilde(log)}")
+
+
 def exec_deploy(req, facts):
-    """Дерево чистое до запуска, исполняются байты deploy.sh из коммита (хеш = показанный) через bash -s; после
-    запуска дерево проверяется снова — изменения попадают в итог."""
-    p = facts["path"]
+    """Факты только что собраны заново (живой ответ GitHub). Своя копия STATE ставится на коммит (checkout -f,
+    reset --hard, clean -ffdx), HEAD = коммит и status с неотслеживаемыми и игнорируемыми пуст; затем зависимости
+    ставит сама копия, ключи — только из STATE/outside/env (как dev-ключи outside), и исполняются байты deploy.sh
+    этого коммита (хеш = показанный) через bash -s с cwd = своя копия. Дерево и индекс роли не участвуют: ни
+    node_modules, ни skip-worktree основной копии на выкладку не влияют."""
     data = facts["bytes"]
     if hashlib.sha256(data).hexdigest() != facts["script"]:
         raise Refuse("bad", "байты deploy.sh не те, что показаны")
-    with private_git(p) as g:
-        if gitc(g, ["rev-parse", "--verify", "HEAD^{commit}"]) != facts["head"]:
-            raise Refuse("bad", "HEAD сменился после пальца")
-        d = dirty(g, p)
-        if d:
-            raise Refuse("yes", f"в репозитории незакоммиченное ({d.splitlines()[0][:80]}) — выкладка только с чистого "
-                                "коммита")
+    d, head = facts["copy"], facts["head"]
+    gd = os.path.join(d, ".git")
+    env = git_env(gd, GIT_WORK_TREE=d, GIT_INDEX_FILE=os.path.join(gd, "index"))
+    for args in (["checkout", "-q", "-f", "--detach", head], ["reset", "-q", "--hard", head], ["clean", "-q", "-ffdx"]):
+        run_git(args, env, d, 300)
+    if run_git(["rev-parse", "--verify", "HEAD^{commit}"], env, d).decode("utf-8", "replace").strip() != head:
+        raise Refuse("bad", f"своя копия не на коммите {head[:12]}")
+    left = run_git(["status", "--porcelain", "--untracked-files=all", "--ignored"], env, d, 120)
+    if left.strip():
+        raise Refuse("bad", f"своя копия не чистая ({left.decode('utf-8', 'replace').splitlines()[0][:80]})")
+    if os.path.lexists(os.path.join(d, ".gitmodules")):
+        raise Refuse("yes", ".gitmodules — подмодули не выкладываю: только «да» владельца словами")
     os.makedirs(state("handoff", "runs"), mode=0o700, exist_ok=True)
     out = state("handoff", "runs", f"{req['id']}.log")
-    env = {"HOME": home(), "PATH": (P.run_env()["PATH"] if P is not None else SAFE_PATH), "LANG": "en_US.UTF-8"}
+    base = {"HOME": home(), "PATH": (P.run_env()["PATH"] if P is not None else SAFE_PATH), "LANG": "en_US.UTF-8"}
+    keys = P.outside_mod().dev_keys(facts["repo"])[0] if P is not None else {}
     with open(out, "a", encoding="utf-8") as fh:
+        deploy_deps(d, base, fh, out)
         # ровно показанные байты из коммита через stdin (bash -s), а не файл с диска
-        r = subprocess.run(["/bin/bash", "-s"], input=data, cwd=p, stdout=fh, stderr=subprocess.STDOUT,
-                           timeout=DEPLOY_TIMEOUT, env=env)
+        r = subprocess.run(["/bin/bash", "-s"], input=data, cwd=d, stdout=fh, stderr=subprocess.STDOUT,
+                           timeout=DEPLOY_TIMEOUT, env={**keys, **base})
     if r.returncode != 0:
         raise Refuse("bad", f"deploy.sh упал с кодом {r.returncode}, журнал {tilde(out)}")
-    with private_git(p) as g:
-        after = dirty(g, p)
-    tail = f"; после выкладки дерево изменилось: {after.splitlines()[0][:80]}" if after else ""
-    return f"deploy.sh прошёл, журнал {tilde(out)}{tail}"
+    after = run_git(["status", "--porcelain", "--untracked-files=all"], env, d, 120).decode("utf-8", "replace").strip()
+    tail = f"; после выкладки своя копия изменилась: {after.splitlines()[0][:80]}" if after else ""
+    return f"deploy.sh прошёл на коммите {head[:12]} в своей копии, журнал {tilde(out)}{tail}"
 
 
 def exec_cdp(req, facts):

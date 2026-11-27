@@ -663,6 +663,25 @@ def test_batch_all_light_nag():
           and b.req(8) is not None and "expired" not in b.log() and b.alerts().count("PR вне ядра") == 2,
           b.outs[-1] + b.alerts())
 
+
+def test_batch_light_unmarked_when_core_appears():
+    """metis-1302: в PR пачки вне ядра появились файлы ядра — у него отметка light снята, у второго осталась; пачка
+    больше не вся вне ядра, за сутки — «expired» с окном на всю пачку, а не nag."""
+    b = batch_box()
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE)
+    b.view(BATCH_SHA[8], pr=8, title="PR 8", files=NONCORE)
+    request_batch(b)
+    b.run(extra=AWAY)
+    check("пачка вне ядра: у обеих отметка light", b.req(7).get("light") and b.req(8).get("light"), (b.req(7), b.req(8)))
+    b.view(BATCH_SHA[7], pr=7, title="PR 7", files=NONCORE + [CORE_FILE])
+    b.run(t=T0 + 60, extra=AWAY)
+    check("в PR 7 появилось ядро: отметка снята у него, у PR 8 осталась", "light" not in b.req(7)
+          and b.req(8).get("light") is True, (b.req(7), b.req(8)))
+    b.run(t=T0 + 25 * 3600, extra=AWAY)
+    check("пачка уже не вся вне ядра: за сутки expired, а не nag", b.req(7) is None and b.req(8) is None
+          and "expired" in b.log() and "nag" not in b.log(), str(b.outs[-1]) + str(b.log()))
+
+
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "tests"))
     from _par import run_cases  # случаи параллельно, каждый в своём fork (metis-0544); исключение — провал случая

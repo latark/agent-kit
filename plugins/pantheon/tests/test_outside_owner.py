@@ -4,6 +4,10 @@
 Claude Code (~/.claude/daemon: control.key и roster.json дают ввод в PTY любой сессии — строку в owner-log), входа
 (~/.claude/.credentials*), IDE (~/.claude/ide) и terminal-notifier (по щелчку выполняет команду от имени владельца);
 запись в доску VIEW (галочка — «ход владельца») и в папку hookd (подмена сокета guard); Apple Events (osascript).
+С metis-0914 — чтение и запись личного: пути [private] policy.toml (тот же список, что denyRead окон) и owner-log. С
+metis-1291 — запуск /bin/launchctl и /usr/bin/open и службы LaunchServices и smd (выход из профиля через launchd).
+
+В GitHub Actions (CI=true) песочница не вложенная: пропуск живой части там — провал (metis-1062).
 
 Проверка двумя слоями. Разбор профиля (везде): правила SBPL вычисляются для путей, позднее правило сильнее — так же,
 как в sandbox-exec. Живой прогон (macOS, не во вложенной песочнице): тот же профиль под sandbox-exec на поддельном HOME —
@@ -103,6 +107,16 @@ def decide(text, op, path):
     return verdict
 
 
+def denies(text, op, kind, val):
+    """Последнее правило op, где есть фильтр (kind, val), — deny (process-exec, mach-lookup: без «позднее сильнее»
+    по путям — у них свои списки)."""
+    verdict = "allow"
+    for act, ops, filt in rules(text):
+        if op in ops and (kind, val) in filt:
+            verdict = act
+    return verdict == "deny"
+
+
 def has_rule(text, act, op, name=None):
     return any(a == act and op in ops and (name is None or ("global-name", name) in filt)
                for a, ops, filt in rules(text))
@@ -118,6 +132,22 @@ READ_DENY = [os.path.join(CL, "daemon", "control.key"), os.path.join(CL, "daemon
 WRITE_DENY = [os.path.join(os.path.realpath(P.VIEW), "metis-1026.md"), os.path.join(os.path.realpath(P.VIEW), "board.jsonl"),
               os.path.join(os.path.realpath(P.HOOKD_DIR), "hookd.sock"), os.path.realpath(P.HOOKD_DIR),
               os.path.join(os.path.realpath(STATE), "owner-log", "zeus.md")]   # К5 — держать
+# metis-0914 (Н1 модели угроз 0902): личное [private] policy.toml (по умолчанию — PERSONAL и git-crypt) и owner-log
+KN = os.path.join(H, "ai", "knowledge")
+PRIVATE_DENY = [os.path.join(KN, x, "note.md") for x in ("me", "Self", "Areas", "People")] + \
+               [os.path.join(KN, "me", ".env.example"),                       # шаблон в личной папке — тоже закрыт
+                os.path.join(KN, ".git", "git-crypt", "keys", "default"),
+                os.path.join(H, "ai", "pantheon", ".git", "git-crypt", "keys", "default"),
+                os.path.join(os.path.realpath(STATE), "owner-log", "zeus.md"),
+                os.path.join(os.path.realpath(STATE), "owner-log", "board.jsonl"),
+                os.path.join(os.path.realpath(STATE), "owner-log", "merge-approve.log")]
+PRIVATE_OPEN = [os.path.join(KN, "notes", "x.md"), os.path.join(KN, "meta", "x.md"),
+                os.path.join(os.path.realpath(STATE), "owner-logs", "x")]
+# metis-1291 (С1 metis-1060): выход из профиля через launchd и LaunchServices — имена держит тест, а не кортеж кода
+ESCAPE_EXEC = ["/bin/launchctl", "/usr/bin/open"]
+ESCAPE_MACH = ["com.apple.coreservices.launchservicesd", "com.apple.lsd.mapdb", "com.apple.lsd.modifydb",
+               "com.apple.lsd.open", "com.apple.lsd.openurl", "com.apple.lsd.xpc", "com.apple.xpc.smd",
+               "com.apple.xpc.loginitemregisterd"]
 READ_OPEN = [os.path.join(CL, "settings.json"), os.path.join(CL, "daemon.json"), os.path.join(CL, "daemonx", "a"),
              os.path.join(CL, "projects", "x.jsonl"), os.path.join(H, "ai", "pantheon-view", "x.md")]
 WRITE_OPEN = [os.path.join(H, "ai", "pantheon-viewer", "x"), os.path.join(H, ".cache", "pantheon", "other", "x"),
@@ -139,6 +169,36 @@ for label, db in (("profile.sb", ()), ("profile-db.sb", (5432,))):
     check(f"{label}: Apple Events закрыты (appleevent-send)", has_rule(text, "deny", "appleevent-send"))
     check(f"{label}: служба Apple Events закрыта (mach-lookup)",
           has_rule(text, "deny", "mach-lookup", "com.apple.coreservices.appleevents"))
+    for p in PRIVATE_DENY:
+        check(f"{label}: личное {os.path.relpath(p, ROOT)} — чтение и запись отказ (metis-0914)",
+              decide(text, "file-read-data", p) == "deny" and decide(text, "file-write-create", p) == "deny")
+    for p in PRIVATE_OPEN:
+        check(f"{label}: соседнее с личным {os.path.relpath(p, ROOT)} читается (правило не шире)",
+              decide(text, "file-read-data", p) == "allow")
+    for x in ESCAPE_EXEC:
+        check(f"{label}: запуск {x} — отказ (metis-1291)", denies(text, "process-exec", "literal", x))
+    for x in ESCAPE_MACH:
+        check(f"{label}: служба {x} закрыта (mach-lookup, metis-1291)", denies(text, "mach-lookup", "global-name", x))
+
+# [private] paths policy.toml — тот же список, что denyRead окон: свой путь «~/…» и абсолютный закрыты, PERSONAL и
+# owner-log — и при своём списке; относительный путь не берётся
+POL = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+os.makedirs(os.path.dirname(POL), exist_ok=True)
+ELSE = os.path.join(ROOT, "elsewhere-private")
+with open(POL, "w") as fh:
+    fh.write(f'[private]\npaths = ["~/vault/diary", "{ELSE}", "rel/ignored"]\n')
+_pt = O.profile_text()
+check("policy.toml [private]: ~/vault/diary — чтение отказ",
+      decide(_pt, "file-read-data", os.path.join(H, "vault", "diary", "a.md")) == "deny")
+check("policy.toml [private]: абсолютный путь — чтение отказ",
+      decide(_pt, "file-read-data", os.path.join(os.path.realpath(ELSE), "a.md")) == "deny")
+check("policy.toml [private]: свой список не снимает PERSONAL и owner-log",
+      decide(_pt, "file-read-data", os.path.join(KN, "me", "a.md")) == "deny"
+      and decide(_pt, "file-read-data", os.path.join(os.path.realpath(STATE), "owner-log", "zeus.md")) == "deny")
+check("policy.toml [private]: относительный путь не берётся", "rel/ignored" not in _pt)
+check("policy.toml [private]: ~/vault рядом с diary открыт",
+      decide(_pt, "file-read-data", os.path.join(H, "vault", "other.md")) == "allow")
+os.remove(POL)
 
 # переопределённая доска (PANTHEON_VIEW) — профиль берёт её, а не путь по умолчанию
 _view = P.VIEW
@@ -169,10 +229,20 @@ try:
     out["notifier"] = "rc%d" % subprocess.run([a[5]], capture_output=True).returncode
 except PermissionError:
     out["notifier"] = "deny"
+try_("read-private", lambda: open(a[6]).read())
+try_("read-ownerlog", lambda: open(a[7]).read())
+for name, cmd in (("launchctl", ["/bin/launchctl", "version"]), ("open", ["/usr/bin/open"])):  # open без аргументов — подсказка, ничего не открывает
+    try:
+        out[name] = "rc%d" % subprocess.run(cmd, capture_output=True, timeout=20).returncode
+    except PermissionError:
+        out[name] = "deny"
+    except subprocess.TimeoutExpired:
+        out[name] = "timeout"
 lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
 port = ctypes.c_uint(0)
 bp = ctypes.c_uint.in_dll(lib, "bootstrap_port")
 out["ae"] = "rc%d" % lib.bootstrap_look_up(bp, b"com.apple.coreservices.appleevents", ctypes.byref(port))
+out["ls"] = "rc%d" % lib.bootstrap_look_up(bp, b"com.apple.coreservices.launchservicesd", ctypes.byref(port))
 print(" ".join(f"{k}={v}" for k, v in out.items()))
 """
 
@@ -186,6 +256,12 @@ def live():
             fh.write("fake\n")
     os.makedirs(P.VIEW, exist_ok=True)
     os.makedirs(P.HOOKD_DIR, exist_ok=True)
+    priv = os.path.join(KN, "me", "note.md")
+    olog = os.path.join(os.path.realpath(STATE), "owner-log", "zeus.md")
+    for f in (priv, olog):
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f, "w") as fh:
+            fh.write("private\n")
     fake_notifier = os.path.join(ROOT, "notifier")
     os.makedirs(os.path.join(fake_notifier, "bin"))
     exe = os.path.join(fake_notifier, "bin", "terminal-notifier")
@@ -202,15 +278,22 @@ def live():
     with open(probe, "w") as fh:
         fh.write(PROBE)
     args = [os.path.join(d, "control.key"), os.path.join(CL, ".credentials.json"), P.VIEW, P.HOOKD_DIR,
-            os.path.join(CL, "settings.json"), exe]
+            os.path.join(CL, "settings.json"), exe, priv, olog]
     bare = subprocess.run([sys.executable, "-I", probe, *args], capture_output=True, text=True, timeout=60)
     r = subprocess.run([SX, "-f", prof, sys.executable, "-I", probe, *args], capture_output=True, text=True, timeout=60)
     if r.returncode == 71 and "sandbox_apply" in r.stderr:
+        # metis-1062: в GitHub Actions (CI=true; у `outside test` — CI=1) песочница не вложенная — пропуск там провал
+        check("живой: в CI живая часть идёт, а не пропускается (metis-1062)", os.environ.get("CI") != "true",
+              r.stderr[-300:])
         print("пропущено: вложенная песочница (sandbox_apply) — живая проверка профиля идёт вне окон")
         return
+    print(f"живой: идёт под sandbox-exec (код {r.returncode})")
+    bare_got = dict(x.split("=", 1) for x in bare.stdout.split())
+    want = {"read-key": "ok", "read-cred": "ok", "write-view": "ok", "write-hookd": "ok", "read-open": "ok",
+            "notifier": "rc0", "ae": "rc0", "read-private": "ok", "read-ownerlog": "ok"}
     check("живой: без профиля проба читает, пишет и запускает (контроль)",
-          bare.stdout.split() == ["read-key=ok", "read-cred=ok", "write-view=ok", "write-hookd=ok", "read-open=ok",
-                                  "notifier=rc0", "ae=rc0"], (bare.stdout, bare.stderr[-300:]))
+          {k: bare_got.get(k) for k in want} == want and bare_got.get("launchctl", "deny") != "deny",
+          (bare.stdout, bare.stderr[-300:]))
     got = dict(x.split("=", 1) for x in r.stdout.split())
     check("живой: control.key под профилем — отказ (К1)", got.get("read-key") == "deny", (r.stdout, r.stderr[-300:]))
     check("живой: .credentials под профилем — отказ", got.get("read-cred") == "deny", r.stdout)
@@ -219,6 +302,14 @@ def live():
     check("живой: обычный файл ~/.claude читается (контроль)", got.get("read-open") == "ok", r.stdout)
     check("живой: terminal-notifier не запускается (К6)", got.get("notifier") in ("deny", "rc126"), r.stdout)
     check("живой: служба Apple Events не находится (К7)", got.get("ae", "rc0") != "rc0", r.stdout)
+    check("живой: личное ~/ai/knowledge/me — отказ (metis-0914)", got.get("read-private") == "deny", r.stdout)
+    check("живой: owner-log — отказ (metis-0914)", got.get("read-ownerlog") == "deny", r.stdout)
+    check("живой: /bin/launchctl не запускается (metis-1291)", got.get("launchctl") == "deny", r.stdout)
+    check("живой: /usr/bin/open не запускается (metis-1291)", got.get("open") == "deny", r.stdout)
+    if bare_got.get("ls") == "rc0":
+        check("живой: служба LaunchServices не находится (metis-1291)", got.get("ls", "rc0") != "rc0", r.stdout)
+    else:
+        print(f"пропущено: служба LaunchServices не найдена и без профиля ({bare_got.get('ls')})")
 
 
 if MAC and os.path.exists(SX):

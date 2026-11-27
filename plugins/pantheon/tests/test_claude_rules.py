@@ -139,22 +139,13 @@ except C.Refused as e:
     err = e
 check("walk: папку не прочесть — с errors строка и пусто, без errors — Refused",
       items == [] and errs == ["x/: не прочитана (OSError)"] and err is not None and "не прочитана" in str(err), (errs, err))
-mono, ticks, seen, errs = C.time.monotonic, [0], [], []   # часы стоят на 0, пока on_found не позвали, — порядок readdir не важен
-
-
-def tick():
-    ticks[0] += bool(seen)   # после первой находки — +1 за каждый вызов, срок 5 истекает через 6 шагов
-    return ticks[0]
-
-
-C.time.monotonic = tick
-C.DEADLINE = 5
-try:
-    C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
-finally:
-    C.DEADLINE, C.time.monotonic = None, mono
-check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found (не меньше одного и не весь обход)",
-      errs == ["срок обхода истёк"] and 1 <= len(seen) <= 6, (errs, seen))
+mono, seen, errs = C.time.monotonic, [], []   # часы стоят, пока нет находки, и уходят за срок после первой
+C.time.monotonic = lambda: 1000 if seen else 0   # не зависит ни от порядка обхода, ни от числа чужих вызовов
+C.DEADLINE = 40
+C.walk(top, deep, limit=C.NO_LIMIT, nested=True, errors=errs, on_found=seen.append)
+C.DEADLINE, C.time.monotonic = None, mono
+check("walk: срок истёк — стоп и строка, найденное до него — уже в on_found",
+      errs[-1:] == ["срок обхода истёк"] and errs.count("срок обхода истёк") == 1 and seen, (errs, seen))   # порядок обхода — любой
 check("hot_dir: корень, первый уровень, корни вложенных копий и их первый уровень — .husky и папки шаблонов .claude",
       all(C.hot_dir(p) for p in ("app", ".claude", ".claude/skills/a/b", "app/.Claude/hooks", ".husky/x", ".claude/worktrees",
                                  ".claude/worktrees/y", ".claude/worktrees/y/sub", ".claude/worktrees/y/sub/.claude/hooks/x",

@@ -11,6 +11,8 @@
     только файлы, ToolSearch и MCP qmd;
   - тексты: координатор передаёт лиду isolation только из папки в git и знает palamedes, brief.part — исключение «модель в вызове», имя в
     names.part, palamedes в списках окон HQ_AGENTS и COORDINATOR_AGENTS;
+  - правило запуска окон (metis-1052): одно и одинаковое в hq.tmpl (ROLE-11, SCHED) и README, прежних правил «по слову
+    владельца» нет; мутанты отката — внутри теста;
   - сборку ролей из шаблонов плагина (Python 3.11+): palamedes.md со Skill в запрете, лиды без isolation.
 HOME, PANTHEON_HOME и PANTHEON_STATE подменены временной папкой. PANTHEON_TEST_TEXT_STOP_HOOK — путь к другой копии
 хука (прогон мутантов).
@@ -281,9 +283,63 @@ def build_test():
           built_tools is not None and {"Read", "Write"} <= built_tools and built_tools <= PALAMEDES_TOOLS)
 
 
+LAUNCH_RULE_START = "**Правило запуска окон (решение владельца 27.11, metis-1052).**"
+LAUNCH_RULE_END = "(«остановлено вами»)."
+# слова, без которых правило уже другое (решение владельца 27.11, metis-1052)
+LAUNCH_RULE_MUST = ("Окна поднимаются сами: по расписанию, по очереди задач и по заявкам Зевса.",
+                    "Упавшее окно Зевс поднимает сам, без вопроса владельцу",
+                    "Расход держат потолок недели и бюджет ночи",
+                    "Слово владельца для запуска нужно только в двух случаях: поднять потолок недели и вернуть окно")
+# прежние правила, которые противоречили одному (ROLE-11 и SCHED до metis-1052)
+LAUNCH_RULE_OLD = ("`--restart` — остановить и начать заново — только по слову владельца",
+                   "Запуск и перезапуск окна по слову владельца",
+                   "Технический перезапуск — только по слову владельца")
+
+
+def launch_rule(text):
+    """Текст правила запуска окон между метками, пробелы и переносы сжаты; None — правила нет."""
+    i = text.find(LAUNCH_RULE_START)
+    j = text.find(LAUNCH_RULE_END, i) if i >= 0 else -1
+    return " ".join(text[i:j + len(LAUNCH_RULE_END)].split()) if j >= 0 else None
+
+
+def launch_rule_problems(hq, readme):
+    """metis-1052: одно правило запуска окон, одинаковое в hq.tmpl и README → список расхождений (пусто — годно)."""
+    a, b = launch_rule(hq), launch_rule(readme)
+    out = [f"нет правила в {n}" for n, x in (("hq.tmpl", a), ("README", b)) if x is None]
+    if a is not None and b is not None and a != b:
+        out.append("правило в hq.tmpl и README различается")
+    out += [f"в правиле нет «{w[:40]}…»" for w in LAUNCH_RULE_MUST if a is not None and w not in a]
+    out += [f"прежнее правило в {n}: «{w[:40]}…»" for w in LAUNCH_RULE_OLD
+            for n, x in (("hq.tmpl", hq), ("README", readme)) if w in " ".join(x.split())]
+    return out
+
+
+def launch_rule_tests():
+    """metis-1052: правило запуска окон одно — в ROLE-11 и SCHED роли Зевса и в README пульта; мутанты — откат правки."""
+    hq = read(os.path.join(ROLES, "hq.tmpl"))
+    readme = read(os.path.join(os.path.dirname(os.path.dirname(PLUGIN)), "README.md"))
+    got = launch_rule_problems(hq, readme)
+    check(f"metis-1052: правило запуска окон одно и одинаковое в hq.tmpl и README {got}", got == [])
+    check("metis-1052: ROLE-11 ссылается на правило, упавшее окно — без вопроса владельцу",
+          "упавшее окно поднимаешь сам, без вопроса владельцу, — по правилу запуска окон" in " ".join(hq.split()))
+    rule = launch_rule(hq) or ""
+    mutants = {
+        "откат ROLE-11 (--restart по слову владельца)": (hq + "\n" + LAUNCH_RULE_OLD[0], readme),
+        "откат SCHED (запуск по слову владельца)": (hq + "\n- " + LAUNCH_RULE_OLD[1] + " — вопросом", readme),
+        "откат техперезапуска": (hq, readme + "\n- " + LAUNCH_RULE_OLD[2] + ":"),
+        "правила нет в README": (hq, readme.replace(LAUNCH_RULE_START, "")),
+        "README расходится с hq.tmpl": (hq, readme.replace("по заявкам Зевса.", "по слову владельца.", 1)),
+        "в правиле третий случай слова": (hq.replace("в двух случаях", "в трёх случаях", 1), readme),
+    }
+    alive = [n for n, (h, r) in mutants.items() if not launch_rule_problems(h, r)]
+    check(f"metis-1052: мутанты правила запуска окон убиты (выжили: {alive})", rule and not alive)
+
+
 def main():
     hook_tests()
     template_tests()
+    launch_rule_tests()
     build_test()
     bad = results.count(False)
     print(f"{len(results) - bad}/{len(results)} проверок прошли")
