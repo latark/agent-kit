@@ -875,11 +875,11 @@ def test_check():
         r = run_check(env, T0)
         check("check: с mode — ошибки нет", "demo-0101" not in r.stdout and r.returncode == 0, r.stdout)
         # 2. закрытая по слиянию без release / actual
-        put(home, "demo", "demo-0102", status="done", closed="2026-10-10", body="- закрыта по слиянию PR #4\n")
+        put(home, "demo", "demo-0102", status="done", closed="2026-10-25", body="- закрыта по слиянию PR #4\n")
         r = run_check(env, T0)
         check("check: закрытая по слиянию без release — ОШИБКА с id",
               r.returncode != 0 and "ОШИБКА · demo-0102" in r.stdout and "release" in r.stdout and "actual" in r.stdout, r.stdout)
-        put(home, "demo", "demo-0102", status="done", closed="2026-10-10", body="- закрыта по слиянию PR #4\n", release="PR #4 → abc1234", actual="нет замера")
+        put(home, "demo", "demo-0102", status="done", closed="2026-10-25", body="- закрыта по слиянию PR #4\n", release="PR #4 → abc1234", actual="нет замера")
         r = run_check(env, T0)
         check("check: с release и actual — ошибки нет", "demo-0102" not in r.stdout, r.stdout)
         # 3. done без closed — ошибка и починка из updated
@@ -925,6 +925,18 @@ def test_board_problems_unit():
     errs, _ = T.board_problems(tasks, T0)
     check("board_problems: done без closed — ошибка с id, с closed — нет",
           [i for i, _ in errs] == ["x-0001"], str(errs))
+
+
+def test_board_problems_old_closed():
+    """metis-0827: закрытая до введения release/actual (RELEASE_FIELDS_FROM) без этих полей — не ошибка; после — ошибка."""
+    body = "- закрыта по слиянию PR #4\n"
+    tasks = {"x-0001": ("p", {"id": "x-0001", "type": "task", "status": "done", "closed": "2026-10-19"}, body),
+             "x-0002": ("p", {"id": "x-0002", "type": "task", "status": "done", "closed": "2026-10-20"}, body),
+             "x-0003": ("p", {"id": "x-0003", "type": "task", "status": "done", "closed": "2026-11-01"}, body)}
+    errs, _ = T.board_problems(tasks, T0)
+    check("board_problems: закрытая до 2026-10-20 без release/actual — не ошибка; с этой даты — ошибка (metis-0827)",
+          sorted({i for i, _ in errs}) == ["x-0002", "x-0003"] and "x-0001" not in {i for i, _ in errs}, str(errs))
+    check("board_problems: дата введения полей — константа RELEASE_FIELDS_FROM", T.RELEASE_FIELDS_FROM == "2026-10-20")
 
 
 def test_close_criteria():
@@ -1164,6 +1176,7 @@ def main():
     test_lists_and_checked()
     test_unit()
     test_board_problems_unit()
+    test_board_problems_old_closed()
     test_attention_on_card()
     test_close_criteria()
     test_tick()
