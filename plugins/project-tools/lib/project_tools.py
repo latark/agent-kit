@@ -508,7 +508,7 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     for src, label, key in ((shared, ".claude/settings.json", "enabledPlugins"), (local, ".claude/settings.local.json", "enabledPlugins"),
                             (shared, ".claude/settings.json", "extraKnownMarketplaces"), (shared, ".claude/settings.json", "env")):
         if src.get(key) and not isinstance(src.get(key), dict):
-            p.notes.append(f"{label}: {key} не словарь ({src[key]!r:.60}) — считаю пустым, при записи заменю словарём")
+            p.notes.append(f"{label}: {key} не словарь ({src[key]!r:.60}) — считаю пустым; значение заменится словарём, только если запись что-то добавит, иначе файл не тронут")
     new_shared_plugins = dict(_as_dict(shared.get("enabledPlugins")))
     new_local_plugins = dict(_as_dict(local.get("enabledPlugins")))
     new_shared_markets = dict(_as_dict(shared.get("extraKnownMarketplaces")))
