@@ -316,7 +316,7 @@ check("[T9] Н4: «evil/agent-kit» в merge_repos — не latark/agent-kit →
       out is None and w.releases() == [] and not os.path.exists(os.path.join(w.state, "release")), out)
 
 # --- [metis-1403] сетевой признак — по каждой ошибке, а не по склейке ------------------------------------------------
-w = World("global-config")
+w = World("net-per-error-1403")
 _repos, _check, _net = RT.repos, RT.check, RT.P.net_error
 RT.P.net_error = lambda text: "TLS" in str(text)
 RT.repos = lambda: ["a/x", "b/y"]

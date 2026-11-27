@@ -392,7 +392,7 @@ check("[1389] каталог не agent-kit → пусто", MT.repos() == [], M
 OWN[0] = REPO
 
 # metis-1398: каталога нет → строка и тревога, а не молчание
-w = World("stale")
+w = World("nocat-1398")
 OWN[0] = None
 out = MT.tick(T)
 check("[1398] нет каталога → строка «нет каталога» в tick.log", out == "нет каталога" and "map-tick: нет каталога" in w.tick_log(),
@@ -402,7 +402,7 @@ check("[1398] нет каталога → тревога по NOCAT_KEY, кар�
 OWN[0] = REPO
 
 # metis-1403: сетевой признак — по каждой ошибке, не по склейке
-w = World("stale")
+w = World("nocat-1398b")
 _repos, _check, _net = MT.repos, MT.check, MT.P.net_error
 MT.P.net_error = lambda text: "TLS" in str(text)
 MT.repos = lambda: ["a/x", "b/y"]
