@@ -75,7 +75,7 @@ try:
     with open(GUARD, encoding="utf-8") as fh:
         src = fh.read()
     check("guard.py — короткий вход (< 260 строк), правил в нём нет",
-          src.count("\n") < 260and "def check_" not in src and "import guard_rules" in src, src.count("\n"))
+          src.count("\n") < 260 and "def check_" not in src and "import guard_rules" in src, src.count("\n"))
     copy = os.path.join(root, "hooks-copy")
     shutil.copytree(HOOKS, copy, ignore=shutil.ignore_patterns("__pycache__"))
     ev = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": home,

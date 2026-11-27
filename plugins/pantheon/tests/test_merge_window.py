@@ -520,7 +520,7 @@ def test_light_unmarked_when_core_appears():
     b.run(t=T0 + 60, extra=AWAY)
     b.view(SHA, files=["README.md", CORE_FILE], state="MERGED")
     b.run(t=T0 + 120, extra=AWAY)
-    check("PR с ядром слит мимо окна: не тихо «вне ядра», а как слитый мимо Touch ID — тревога", b.req() is None
+    check("PR с ядром слит мимо окна: заявка снята, merged-outside в журнале нет", b.req() is None
           and "merged-outside" not in b.log(), str(b.outs[-1]) + str(b.log()))
     b = Box()
     b.view(SHA, files=["README.md"])

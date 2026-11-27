@@ -154,7 +154,7 @@ def req(op, **kw):
 # metis-1120: чтение — любой сайт, кроме закрытого списка. Старые проверки отказа «не из списка» идут на хостах,
 # закрытых здесь ключом closed (как в reads.toml владельца); открытый сайт — open-site.org и подобные.
 TEST_CLOSED = (("example.com", "le.com", "example.org", "example.net", "evilavito.ru", "mail-words.ru", "readme.md",
-                "uslugi.ru", "i.ru", "slugi.ru", "evil.com")
+                "uslugi.ru", "i.ru", "slugi.ru", "evil.com", "tail-forged.org", "tail-real.org")
                + tuple(f"{w}-said.org" for w in ("zeus", "task", "board", "label", "chat", "var", "sugg", "odd", "note",
                                                  "verb", "none", "free", "future")))
 TEST_CFG = (B.DEFAULT_DOMAINS, B.DEFAULT_WINDOWS, True, TEST_CLOSED)

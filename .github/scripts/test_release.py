@@ -232,7 +232,7 @@ def t_push_race():
     with open(hook, "w") as fh:
         fh.write("#!/bin/sh\n[ -f %s ] && exit 0\ntouch %s\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n"
                  "cd %s && git pull -q origin main && echo 'b = 2' > plugins/pantheon/lib/b.py && "
-                 "git commit -qam second && git push -q origin HEAD:main\nexit 0\n" % (marker, marker, other))
+                 "git -c user.name=t -c user.email=t@t commit -qam second && git push -q origin HEAD:main\nexit 0\n" % (marker, marker, other))
     os.chmod(hook, 0o755)
     rc, out = run(w, "--push")
     check("гонка: код 0 после повтора", rc == 0 and "попытка 1 не прошла" in out, out)
