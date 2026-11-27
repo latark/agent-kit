@@ -335,6 +335,16 @@ try:
          why="закрыт окну на чтение")
     r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_ROLE": "../job-jobrole"})
     check("роль с «/» файл окна задачи не выбирает — закрытого нет, код 0", r.returncode == 0, r.stderr)
+    # metis-1428: папка settings/job-x есть, роль «x/../evil» вела бы через неё в settings/evil.json — проверка os.sep её держит
+    os.makedirs(os.path.join(state, "settings", "job-x"), exist_ok=True)
+    json.dump({"sandbox": {"filesystem": {"denyRead": [f"{tmpd}/deny-me/**"]}}},
+              open(os.path.join(state, "settings", "evil.json"), "w"))
+    r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_ROLE": "x/../evil"})
+    check("роль «x/../evil» при папке settings/job-x файл settings/evil.json не выбирает — код 0", r.returncode == 0, r.stderr)
+    r = cli("comment", "5", "-F", closed_f, env={"PANTHEON_ROLE": "x/../evil"},
+            lib=mutant('    if role and role not in (".", "..") and os.sep not in role:\n', '    if role and role not in (".", ".."):\n'))
+    check("мутант убит: без проверки os.sep роль «x/../evil» выбирает settings/evil.json — отказ",
+          refused(r) and "закрыт окну на чтение" in r.stderr, r.stderr)
     # metis-1424: источники сверены с sandbox_build — settings/<имя>.json пишет только write_window; его вызовы в
     # pantheon.py: окно направления и окно задачи (name), hestia, hq. Новый вызов — новый источник: добавить его в
     # _read_closed и сюда
