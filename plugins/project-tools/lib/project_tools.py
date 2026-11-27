@@ -553,6 +553,10 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
                 p.changes.append(f".claude/settings.json: маркетплейс {mkt['name']} добавлен ({mkt['source']['repo']})")
                 if name not in p.missing:
                     p.missing.append(name)
+            elif mkt and (new_shared_markets[mkt["name"]] or {}).get("source") != mkt["source"]:
+                theirs = ((new_shared_markets[mkt["name"]] or {}).get("source") or {}).get("repo", "?")
+                p.notes.append(f"{name}: маркетплейс {mkt['name']} в settings.json указывает на {theirs}, карта велит "
+                               f"{mkt['source']['repo']} — не меняю")
             for key, val in (tool.get("env") or {}).items():
                 if key not in new_shared_env:
                     new_shared_env[key] = val
