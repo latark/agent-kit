@@ -520,8 +520,18 @@ check("чужое значение env не меняется, чужие клю�
 off = project(home, "extoff", {"extension/manifest.json": {"manifest_version": 3}, ".claude/settings.json":
                                {"enabledPlugins": {"modern-web-guidance@googlechrome": False}}})
 run(home, "apply", "--dir", off)
+off_sh = load(os.path.join(off, ".claude", "settings.json"))
 check("плагин выключен в проекте: ни маркетплейса, ни env не пишем",
-      "extraKnownMarketplaces" not in load(os.path.join(off, ".claude", "settings.json")))
+      "extraKnownMarketplaces" not in off_sh and "DISABLE_TELEMETRY" not in (off_sh.get("env") or {}), json.dumps(off_sh))
+# metis-1367: маркетплейс с тем же именем, но другим source — не меняем чужой, а пишем заметку (как для env)
+foreign = project(home, "extmkt", {"extension/manifest.json": {"manifest_version": 3},
+                                   ".claude/settings.json": {"extraKnownMarketplaces": {
+                                       "googlechrome": {"source": {"source": "github", "repo": "someone/fork"}}}}})
+r = run(home, "apply", "--dir", foreign)
+fsh = load(os.path.join(foreign, ".claude", "settings.json"))
+check("чужой source маркетплейса не меняется и заметка о нём есть",
+      fsh["extraKnownMarketplaces"]["googlechrome"]["source"]["repo"] == "someone/fork"
+      and "не меняю" in r.stdout and "someone/fork" in r.stdout, r.stdout)
 
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",

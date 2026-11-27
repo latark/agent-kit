@@ -6,6 +6,7 @@ outside.jsonl; `pantheon outside key` кладёт значение скрыты
 import os
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _outside_common import *  # noqa: F403,E402
@@ -284,10 +285,35 @@ _PWQ = "S3cr%2Ft-pw-xyz"
 _GRAMS = sorted({w[i:i + 4] for w in (_PWQ, PW) for i in range(len(w) - 3)})
 
 
-def frags(text):
-    """Куски пароля (по 4 знака) в тексте — ловят и обрезанное начало, и обрезанный конец."""
-    return [g for g in _GRAMS if g in (text or "")]
+def _env_roots():
+    """Корни временных папок окружения (metis-1366): их хвост — случайный mkdtemp, в нём бывает «cr/t» из «…cr» + «/tmp»."""
+    roots = {HOME, STATE, tempfile.gettempdir(), os.path.dirname(tempfile.gettempdir()), os.environ.get("TMPDIR", "")}
+    roots |= {os.path.realpath(r) for r in roots if r}
+    return sorted((r.rstrip("/") for r in roots if len(r.rstrip("/")) > 1), key=len, reverse=True)
 
+
+def frags(text):
+    """Куски пароля (по 4 знака) в тексте — ловят и обрезанное начало, и обрезанный конец. Корни временных папок
+    окружения из текста вырезаются (случайный путь не должен давать ложный кусок); остальное — как было."""
+    text = text or ""
+    for root in _env_roots():
+        text = text.replace(root, "")
+    return [g for g in _GRAMS if g in text]
+
+
+_tmp_was = os.environ.get("TMPDIR")
+os.environ["TMPDIR"] = "/tmp/run-tests-x/024-2wsixtcr"      # как в CI #541: хвост корня кончается на «cr»
+try:
+    _path = os.environ["TMPDIR"] + "/tmp/y.log"
+    check("frags (metis-1366): «cr/t» из случайного хвоста корня временной папки куском пароля не считается",
+          "cr/t" in _path and frags(_path) == [], frags(_path))
+    _leak = f"{os.environ['TMPDIR']}/tmp/y.log: хвост S3cr%2"
+    check("frags (metis-1366): настоящий кусок пароля рядом с путём по-прежнему виден", frags(_leak) != [], frags(_leak))
+finally:
+    if _tmp_was is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = _tmp_was
 
 _pad = "P" * (200 - len("postgresql://postgres.abcd:S3cr%2Ft"))   # граница 200 знаков — внутри пароля
 _long = 4000 + 32 - len(URL_APP)                                  # строка длиннее TAIL_CHARS: хвост — с середины пароля
