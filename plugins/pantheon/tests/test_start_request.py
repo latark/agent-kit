@@ -508,6 +508,8 @@ try:
     os.chmod(fake, 0o755)
     real_ptc = P.project_tools_cmd
     P.project_tools_cmd = lambda: fake
+    # metis-1421: dir — только папки направления окна (domains.json) и их .claude/worktrees/<имя>
+    P.write_json(P.path("domains.json"), {"domains": {**doms, "metis-pantheon": [proj]}})
     try:
         with open(os.path.join(pdir, "install-aaaa.req"), "w") as fh:
             json.dump({"dir": proj, "plugins": ["x@y"], "time": 1}, fh)
@@ -529,8 +531,30 @@ try:
         check("1409 проход: заявка на плагины — жёсткая ссылка (ссылок 2) → отклонена, project-tools не зван",
               len(got) == 1 and got[0][0] is None and "ссылок 2" in got[0][1] and ran2 == ran
               and os.listdir(pdir) == [], (got, ran2))
+        wt = os.path.join(proj, ".claude", "worktrees", "wt-1")
+        other = os.path.realpath(os.path.join(P.HOME, "projects", "site-b"))  # папка чужого направления hermes-siteb
+        incache = os.path.realpath(os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "metis-pantheon", "cfg"))
+        deep = os.path.join(proj, "sub")
+        for d in (wt, other, incache, deep):
+            os.makedirs(d, exist_ok=True)
+        for name, d in (("install-d1.req", wt), ("install-d2.req", other)):
+            with open(os.path.join(pdir, name), "w") as fh:
+                json.dump({"dir": d}, fh)
+        got = M.take_install_requests(P.now())
+        for name, d in (("install-d3.req", incache), ("install-d4.req", deep)):
+            with open(os.path.join(pdir, name), "w") as fh:
+                json.dump({"dir": d}, fh)
+        got += M.take_install_requests(P.now())
+        ran3 = open(fake + ".log").read().splitlines() if os.path.exists(fake + ".log") else []
+        check("1421 заявка на плагины: worktree папки направления — ставится; папка чужого направления, кэш окон, "
+              "подпапка проекта — отклонены, project-tools не зван",
+              [g[0] for g in got] == [wt, None, None, None] and got[0][1] == 0
+              and "не папка направления metis-pantheon" in got[1][1] and "pantheon-sandbox" in got[2][1]
+              and "не папка направления" in got[3][1] and ran3 == ran2 + [f"|install --dir {wt}"]
+              and os.listdir(pdir) == [], (got, ran3))
     finally:
         P.project_tools_cmd = real_ptc
+        P.write_json(P.path("domains.json"), {"domains": doms})
     os.environ.pop("PANTHEON_ROLE")
     with contextlib.suppress(FileNotFoundError):
         os.unlink(P.path("owner-log", "zeus.md"))

@@ -260,6 +260,21 @@ def _install_read(dfd, fname):
     return folder, None
 
 
+def _install_dir_problem(w, folder):
+    """metis-1421: dir заявки окна w — только папка его направления (domains.json из directions.toml) или её
+    .claude/worktrees/<имя>; папка в кэшах окон (pantheon-sandbox) — никогда: там настройки под управлением окна,
+    а claude plugin идёт вне песочницы. → причина отказа или None."""
+    caches = os.path.realpath(os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox"))
+    if folder == caches or folder.startswith(caches + os.sep):
+        return "dir — в кэше окон (pantheon-sandbox)"
+    doms = P.read_json(P.path("domains.json"), {}).get("domains") or {}
+    own = doms.get(w) if isinstance(doms.get(w), list) else []
+    for f in (os.path.realpath(os.path.expanduser(x)) for x in own if isinstance(x, str)):
+        if folder == f or os.path.dirname(folder) == os.path.join(f, ".claude", "worktrees"):
+            return None
+    return f"dir — не папка направления {w} и не её .claude/worktrees/<имя> (directions.toml)"
+
+
 def take_install_requests(t):
     """Плановый проход вне окна (metis-1409): заявки окон ролей на плагины проекта → `project-tools install --dir D`.
     Что ставить и одобрено ли, решает сама команда по карте стеков и настройкам проекта (заявка несёт только папку);
@@ -284,6 +299,7 @@ def take_install_requests(t):
                 if not (fname.startswith("install-") and fname.endswith(".req")):
                     continue
                 folder, bad = _install_read(dfd, fname)
+                bad = bad or _install_dir_problem(w, folder)
                 try:
                     os.unlink(fname, dir_fd=dfd)
                 except OSError:
