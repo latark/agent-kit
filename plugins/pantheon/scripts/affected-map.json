@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "head": "21b9dced",
+  "head": "0527e074",
   "python": "3.14",
   "hashes": {
     "guard/test_agents_after.py": "db8a044f29083840209e6c6d9b8018ea6098231b66c3d31cf843ab668997e943",
@@ -147,7 +147,7 @@
     "pantheon/test_outside.py": "c233024cd5b1fb6fb53c270b61032d5828c1d1894b485ac8ac36f9ddbaee72d4",
     "pantheon/test_outside_auth.py": "d017a93f0db886d14b83ebef5bbd379de1cc11a4726845a2167ba27cf12054d6",
     "pantheon/test_outside_cancel.py": "c06caa8f53f8521955c7093e0e972a9314f806e17f61d157aba738de0df50e4b",
-    "pantheon/test_outside_idle.py": "2611899db39850a573c5b111d344f737e40396acfd7dbb5efc5ca38d901e6565",
+    "pantheon/test_outside_idle.py": "48411ff3b6238db1770c469cd1d368e3bc7737abe8e71a8d9a6788ef00a39d87",
     "pantheon/test_outside_lanes.py": "0eb4184eb0c1fe280485105de1705d1b8b88c7f23af2e9b4bef641951bc1ea45",
     "pantheon/test_outside_load.py": "549d526fc5871823cf6bf6291c91c6e48bba8760bc62d8926315a19a0481f1e8",
     "pantheon/test_outside_login.py": "2b1b52fdc7b8cf4b3db7ad4df40575232ce97ede1bbc0abeb6df054e40f7d8f6",
@@ -492,7 +492,7 @@
     "project-tools/test_mcp_probe.py",
     "project-tools/test_project_tools.py"
   ],
-  "broken": [],
+  "broken": ["pantheon/test_window_threats.py"],
   "readers": ["guard/test_context.py", "guard/test_core_deps.py", "guard/test_taint.py", "pantheon/test_glossary.py", "pantheon/test_private_conf.py", "pantheon/test_window_pack.py"],
   "files": {
     ".claude-plugin/marketplace.json": [186],
@@ -1009,7 +1009,7 @@
   },
   "sums": {
     ".claude-plugin/marketplace.json": "2d85737b88389ce7fd67d9b4bebc427dff0d94484e2105fe3f989a410bfc1a11",
-    ".claude-plugin/releases.json": "a4d59889efe1b939b8c0360305cb5bbbaa1b58c5e209eadeaa04ec02c441717d",
+    ".claude-plugin/releases.json": "1a499bfd8cf6ee88a8066e6c7ea7c93a616ab812c4f6477f6da9b90595941f94",
     ".github/ruff-requirements.txt": "067b86c8c007e2af54995b8aeef4d6c71542e445c7f2ee7246ee9f2c756464a3",
     ".github/scripts/release.py": "7c3a120f029aa7bb662d358889a4ff489ea298a014071a9c9ec71e2fab417dbe",
     ".github/scripts/test_release.py": "18e3a331da1a072c6791d93991d312b36e940c4be93eb379c2609d168d6df61f",
@@ -1112,7 +1112,7 @@
     "plugins/guard/tests/test_tg_self.py": "3ab61e310e650442e3dd261d4ee409b9fe311d4c780da1eb221749a3dd84691c",
     "plugins/guard/tests/test_worktree_cmd.py": "2fa5ce89eb5225493387c693f0ff7f801155debb8b3d835978e9e01a87c1a4cf",
     "plugins/guard/tests/test_worktree_own.py": "e8b58ba82bd293e49a9c71c612b07b28723cc262436d13be96278c98cd5a68d1",
-    "plugins/pantheon/.claude-plugin/plugin.json": "0194fcb20c2c9f38b7e029841c103f8c9dad20085083e45103d0e312b2f8655f",
+    "plugins/pantheon/.claude-plugin/plugin.json": "a4fb8ef17c736231de436d43836326d706e31a5746dedd24c128eb58c81bdf27",
     "plugins/pantheon/bin/heavy": "86beacc7de5f89704500f15a8e5139c81cfaba20aeaca29007399c48bdc50a4b",
     "plugins/pantheon/bin/pantheon": "fb57ba5992df6b6d75a913429ccdb7438bb5bd95301a95184f639d98b32a4220",
     "plugins/pantheon/bin/pantheon-setup": "cb5b2d9f88ead0eab3775567e122850fa324b92ef0e946d3019d718f4d89adab",
@@ -1410,7 +1410,7 @@
     "plugins/pantheon/tests/test_outside.py": "c233024cd5b1fb6fb53c270b61032d5828c1d1894b485ac8ac36f9ddbaee72d4",
     "plugins/pantheon/tests/test_outside_auth.py": "d017a93f0db886d14b83ebef5bbd379de1cc11a4726845a2167ba27cf12054d6",
     "plugins/pantheon/tests/test_outside_cancel.py": "c06caa8f53f8521955c7093e0e972a9314f806e17f61d157aba738de0df50e4b",
-    "plugins/pantheon/tests/test_outside_idle.py": "2611899db39850a573c5b111d344f737e40396acfd7dbb5efc5ca38d901e6565",
+    "plugins/pantheon/tests/test_outside_idle.py": "48411ff3b6238db1770c469cd1d368e3bc7737abe8e71a8d9a6788ef00a39d87",
     "plugins/pantheon/tests/test_outside_lanes.py": "0eb4184eb0c1fe280485105de1705d1b8b88c7f23af2e9b4bef641951bc1ea45",
     "plugins/pantheon/tests/test_outside_load.py": "549d526fc5871823cf6bf6291c91c6e48bba8760bc62d8926315a19a0481f1e8",
     "plugins/pantheon/tests/test_outside_login.py": "2b1b52fdc7b8cf4b3db7ad4df40575232ce97ede1bbc0abeb6df054e40f7d8f6",
