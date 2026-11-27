@@ -62,6 +62,8 @@ VERSION = 3
 # шаблоны ролей — 41 файл из 3-4 папок, это данные одной части, а не дерево: их связи остаются
 READERS_MIN = 20
 READERS_DIRS = 5
+# Хвост вывода упавшего при сборке файла (строки «     | …» под FAIL): map_tick берёт его в итог для разбора (metis-1169)
+BROKEN_TAIL = 40
 
 _spec = importlib.util.spec_from_file_location("run_tests", os.path.join(HERE, "run-tests.py"))
 RT = importlib.util.module_from_spec(_spec)
@@ -385,7 +387,7 @@ def run_all(repo, files, queue, plugin_rel, n):
                 print(f"{mark} {job.label} · {job.sec:.1f} с · файлов задето {len(hits[job.label])}{rd}{why}",
                       flush=True)
                 if not job.ok:
-                    tail = [ln for ln in job.out.rstrip("\n").splitlines() if not ln.startswith("ok ")][-RT.TAIL // 4:]
+                    tail = [ln for ln in job.out.rstrip("\n").splitlines() if not ln.startswith("ok ")][-BROKEN_TAIL:]
                     print("\n".join("     | " + ln for ln in tail), flush=True)
             time.sleep(0.05)
     finally:

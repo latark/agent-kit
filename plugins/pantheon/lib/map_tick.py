@@ -20,10 +20,11 @@ affected-map.py --update <папки плагинов>` с таймаутом UP
 коммит «карта: affected-map на <sha7>» от pantheon-tick и обычный `git push origin HEAD:main`. main ушёл вперёд
 (push отклонён) — не сбой: следующая проверка начнёт заново. Итог работника — STATE/map-tick.json (result), тик
 пишет его строкой `map-tick:` в logs/tick.log; сбой — тревога alert_once без critical, удача её снимает.
-Карта с упавшими при сборке файлами (поле broken, кроме BROKEN_OK) в main не идёт: упали они от нагрузки Mac или
-таймаута, а run-tests.py проверяет «ни один файл тестов не упал при сборке» (test_run_tests.py) — такая карта красит main
-(метка sb-map-broken, 08.11: 9 файлов при load 100–300). Работник не коммитит её, ничего не меняет в main, пишет сбой
-(тревога alert_once); sha запоминается, как при любом сбое, повтор — когда main сдвинется.
+Упавший при сборке файл (поле broken карты) карту не держит (metis-1169, решение 27.11): его связей в карте нет, а
+run-tests.py --affected гоняет его при любой правке (always = broken | readers). Раньше такая карта в main не шла, и пять
+файлов, падавших при сборке, держали её старой с 13.11 — affected в CI гонял почти всё. Теперь карта коммитится, а
+упавшие файлы (кроме BROKEN_OK) называются в итоге; хвост вывода каждого (строки «     | …» под его FAIL в выводе
+--update, до TAIL_LINES) — в STATE/map-tick.json, ключ broken_tails {sha, files: {файл: [строки]}}, для разбора причины.
 Push в main этим процессом идёт вне окон ролей: хук push защиты (guard) на него не действует; ветка main должна
 принимать push от входа gh владельца так же, как для release.py --push.
 PANTHEON_DRYRUN=1 (тесты тика) — ничего не делает.
@@ -44,7 +45,8 @@ MAP_RE = re.compile(r"карта: affected-map на [0-9a-f]{7}")  # тема к
 MAP_AUTHOR = "pantheon-tick"  # и автор: узнаём коммит карты по обоим признакам
 MAP_SCRIPT = os.path.join("plugins", "pantheon", "scripts", "affected-map.py")
 MAP_REL = "plugins/pantheon/scripts/affected-map.json"
-BROKEN_OK = frozenset({"pantheon/test_run_tests.py"})  # его красит сама прошлая карта (см. test_run_tests.py) — не причина отказа
+BROKEN_OK = frozenset({"pantheon/test_run_tests.py"})  # его красит сама прошлая карта (см. test_run_tests.py) — в итоге не называется
+TAIL_LINES = 40  # строк хвоста на упавший при сборке файл в broken_tails
 PLUGIN_DIRS = ("plugins/guard", "plugins/pantheon", "plugins/project-tools")
 REPO_NAMES = ("agent-kit",)
 LOG_DEPTH = 200
@@ -138,18 +140,40 @@ def _patch_state(path, fn):
 
 def _run(argv, cwd, env, timeout, keep=1):
     """→ (код, последняя строка вывода); не запустился или таймаут — (None, причина). Группа процессов гасится целиком."""
+    return _run_out(argv, cwd, env, timeout, keep)[:2]
+
+
+def _run_out(argv, cwd, env, timeout, keep=1):
+    """Как _run, третьим — весь вывод (пустой, если не запустился или таймаут)."""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, start_new_session=True)
     except OSError as e:
-        return None, f"не запустился: {type(e).__name__}"
+        return None, f"не запустился: {type(e).__name__}", ""
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _stop_group(proc)
-        return None, f"дольше {int(timeout)} с — остановлено"
-    lines = [ln for ln in (out or "").splitlines() if ln.strip()]
-    return proc.returncode, " | ".join(ln.strip() for ln in lines[-keep:])[:400]
+        return None, f"дольше {int(timeout)} с — остановлено", ""
+    out = out or ""
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return proc.returncode, " | ".join(ln.strip() for ln in lines[-keep:])[:400], out
+
+
+def broken_tails(out, labels, limit=TAIL_LINES):
+    """Вывод affected-map --update → {файл: последние limit строк «     | …» под его строкой FAIL} для файлов labels."""
+    want, tails, cur = set(labels), {}, None
+    for ln in out.splitlines():
+        if ln.startswith("FAIL "):
+            label = ln[5:].split(" · ", 1)[0].strip()
+            cur = label if label in want else None
+            if cur is not None:
+                tails[cur] = []
+        elif cur is not None and ln.startswith("     | "):
+            tails[cur].append(ln[7:])
+        else:
+            cur = None
+    return {lb: tails.get(lb, [])[-limit:] for lb in sorted(want)}
 
 
 def _stop_group(proc):
@@ -196,18 +220,18 @@ def _broken_left(copy):
     return sorted(str(b) for b in raw if b not in BROKEN_OK), None
 
 
-def publish(job, env):
-    """Проверка, коммит и push → (итог, ok, сбой?) — итог строкой."""
+def publish(job, env, left=None):
+    """Проверка, коммит и push → (итог строкой, ok: True | False | None — push отклонён). left — список: в него
+    кладутся упавшие при сборке файлы (без BROKEN_OK); карту они не держат (metis-1169)."""
     copy, sha = job["copy"], job["sha"]
     ok, why = _only_map_changed(copy, env)
     if not ok:
         return why, False
-    left, why = _broken_left(copy)
-    if left is None:
+    got, why = _broken_left(copy)
+    if got is None:
         return why, False
-    if left:
-        return (f"карта собрана с упавшими файлами ({len(left)}): {', '.join(left)[:250]} — не коммичу, "
-                f"прежняя карта остаётся в main"), False
+    if left is not None:
+        left.extend(got)
     for args in (("add", "--", MAP_REL),
                  ("-c", "user.name=pantheon-tick", "-c", "user.email=pantheon-tick@localhost", "commit", "-q", "-m",
                   f"карта: affected-map на {sha[:7]}")):
@@ -219,7 +243,9 @@ def publish(job, env):
         if re.search(r"rejected|non-fast-forward|fetch first", last):
             return f"main ушёл вперёд, push отклонён — повтор со следующей проверкой ({last})", None
         return f"git push код {code}: {last}", False
-    return f"коммит карты на {sha[:7]} отправлен в main", True
+    note = (f"; упали при сборке ({len(got)}, идут всегда): {', '.join(got)[:250]} — хвосты в map-tick.json broken_tails"
+            if got else "")
+    return f"коммит карты на {sha[:7]} отправлен в main{note}", True
 
 
 def work(job):
@@ -227,14 +253,23 @@ def work(job):
     st_path = job["state"]
     _patch_state(st_path, lambda st: st.setdefault("running", {}).update(pid=os.getpid()))
     env = dict(os.environ)  # окружение дал spawn через env= Popen, а не argv: argv видит любой пользователь (ps)
-    code, last = _run([*job["heavy"], sys.executable, "-I", os.path.join(job["copy"], MAP_SCRIPT), "--update",
-                       *PLUGIN_DIRS], job["copy"], env, job.get("timeout", UPDATE_TIMEOUT))
+    code, last, out = _run_out([*job["heavy"], sys.executable, "-I", os.path.join(job["copy"], MAP_SCRIPT), "--update",
+                                *PLUGIN_DIRS], job["copy"], env, job.get("timeout", UPDATE_TIMEOUT))
+    left = []
     if code != 0:
         text, ok = f"affected-map --update на {job['sha'][:7]}: код {code}: {last}", False
     else:
-        text, ok = publish(job, env)
+        text, ok = publish(job, env, left)
     res = {"sha": job["sha"], "repo": job["repo"], "text": text, "ok": ok, "t": time.time()}
-    _patch_state(st_path, lambda st: (st.pop("running", None), st.update(result=res)))
+    tails = {"sha": job["sha"], "files": broken_tails(out, left)} if left else None
+
+    def put(st):
+        st.pop("running", None)
+        st.update(result=res)
+        if tails:
+            st["broken_tails"] = tails
+
+    _patch_state(st_path, put)
     return 0 if ok is not False else 1
 
 

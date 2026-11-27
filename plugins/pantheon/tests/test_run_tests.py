@@ -483,9 +483,9 @@ try:
         RAWMAP = json.load(fh)
 except (OSError, ValueError):
     RAWMAP = {}
-# сам этот файл в копии сборки проверяет прошлую карту: упал он в прошлой сборке — упадёт и в этой, если не исключить
-check("карта: при сборке не упал ни один файл тестов",
-      not set(RAWMAP.get("broken") or ()) - {"pantheon/test_run_tests.py"}, RAWMAP.get("broken"))
+# упавший при сборке файл карту не держит (metis-1169): его связей нет, и --affected гоняет его при любой правке
+check("карта: упавшие при сборке файлы (broken) — среди тестов карты и идут всегда",
+      set(RAWMAP.get("broken") or ()) <= amap["tests"] & amap["always"], RAWMAP.get("broken"))
 # metis-0791: правка bin/heavy — только тесты, что его запускают; линтер словаря читает heavy, но он в readers
 HEAVY = amap["files"].get("plugins/pantheon/bin/heavy", set())
 check("карта: bin/heavy → test_heavy_queue, не больше 12 тестов, без линтеров и test_watch (было 33)",
