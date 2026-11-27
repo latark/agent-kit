@@ -892,6 +892,48 @@ def alert_fold(key, text, who="pantheon", window=ALERT_WINDOW):
     return True
 
 
+ALERT_STREAK = 3  # сбоев сети подряд (проходов), после которых тревога пишется (metis-1381, 1386)
+NET_ERR_RE = re.compile(r"unexpected EOF|\bEOF\b|TLS handshake|SSL_ERROR|unable to access|Could not resolve host|timed out|"
+                        r"TimeoutExpired|i/o timeout|Connection (?:reset|refused)|\bHTTP 50[234]\b", re.I)
+
+
+def net_error(text):
+    """Текст сбоя — разовая неполадка сети (EOF, TLS, таймаут, unable to access), а не ошибка в данных или коде."""
+    return bool(NET_ERR_RE.search(str(text)))
+
+
+def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
+    """Тревога о сетевом сбое только когда он держится n проходов подряд (metis-1381, 1386): разовый обрыв gh или fetch
+    раньше давал строку на каждый всплеск (alert_once снимается на первом успехе). Счётчик — STATE/once/streak-<key>;
+    bad=False сбрасывает его; count=False (лёгкий тик по кэшу, который не ходит в сеть) счёт не растит. Строка — через
+    alert_fold по ключу: пока сбой держится, не чаще раза в сутки со счётчиком повторов. True — строка записана."""
+    mark = once_path("streak-" + key)
+    try:
+        with open(mark, encoding="utf-8") as fh:
+            c = int(fh.read())
+    except (OSError, ValueError):
+        c = 0
+    if not bad:
+        if c:
+            clear_once("streak-" + key)
+        return False
+    if count:
+        c += 1
+        os.makedirs(path("once"), exist_ok=True)
+        write_atomic(mark, str(c))
+    return c >= n and alert_fold("streak-" + key, text, who)
+
+
+def alert_net(key, fail, text, who="pantheon", value=None, count=True):
+    """Тревога о сбое: сетевой (net_error) — через alert_streak, прочие — alert_once как раньше. fail пуст — сбой снят."""
+    net = bool(fail) and net_error(fail)
+    if fail and not net:
+        alert_once(key, value or fail, text, who)
+    else:
+        clear_once(key)
+    return alert_streak(key, net, text, who, count=count)
+
+
 def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
     """Тревога (и уведомление note — сбой класса «скоро», через политику уведомлений) один раз на значение value:
     повтор того же состояния молчит. group — вид уведомления: новое того же вида заменяет прежнее в Центре
@@ -8928,16 +8970,16 @@ def autoclose_repo_dirs():
     return out
 
 
-def autoclose_alerts(repos, errors):
-    """Ошибки gh и закрытия — одна тревога на репозиторий, пока не починится."""
+def autoclose_alerts(repos, errors, count=True):
+    """Ошибки gh и закрытия — одна тревога на репозиторий, пока не починится. Сетевой сбой (EOF, TLS, таймаут gh) —
+    только когда держится ALERT_STREAK проходов fetch подряд, строкой со свёрткой по репозиторию (metis-1381);
+    count=False — лёгкий тик по кэшу, он проходы не считает."""
     for repo in repos:
         key = "autoclose-" + re.sub(r"[^\w-]", "_", repo)[:50]
         bad = {k: v for k, v in errors.items() if k == repo or k.startswith(repo + "#")}
-        if bad:
-            alert_once(key, "|".join(sorted(bad)), "автозакрытие задач: " + "; ".join(f"{k}: {v}" for k, v in sorted(bad.items()))[:300],
-                       "pantheon-tick")
-        else:
-            clear_once(key)
+        text = "автозакрытие задач: " + "; ".join(f"{k}: {v}" for k, v in sorted(bad.items()))[:300]
+        alert_net(key, " ".join(bad.values()) if all(net_error(v) for v in bad.values()) else "|".join(sorted(bad)),
+                  text, "pantheon-tick", "|".join(sorted(bad)), count)
 
 
 AUTOCLOSE_STALE = 3600
@@ -8968,10 +9010,8 @@ def autoclose_tick(t, wait=0):
     if not repo_dirs:
         return
     off = autoclose_off_reason(t, repo_dirs)
-    if off:
-        alert_once("autoclose-off", off, off, "pantheon-tick")
-    else:
-        clear_once("autoclose-off")
+    if off:  # metis-1386: кэш бывает старше часа из-за разового сбоя fetch — одна строка в сутки со счётчиком
+        alert_fold("autoclose-off", off, "pantheon-tick")
     with lock_wait("autoclose-run", wait) as got:
         if not got:
             return
@@ -8980,7 +9020,7 @@ def autoclose_tick(t, wait=0):
     for ln in log:
         print(f"автозакрытие · {ln}")
     if log or errors:
-        autoclose_alerts(sorted(repo_dirs), errors)
+        autoclose_alerts(sorted(repo_dirs), errors, count=False)  # проходы fetch считает сам fetch
     if log:
         refresh_kick()
 
@@ -9629,6 +9669,7 @@ def unlinked_alert(T, unlinked):
 
 
 TAIL_SHOWN = 12
+TAIL_FOLD_WINDOW = 14 * ALERT_WINDOW  # повтор тревоги о том же файле inbox — не чаще раза в две недели (metis-1382)
 TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
@@ -9706,10 +9747,13 @@ def tail_alert(T, items, hold=()):
         shown = fresh[:TAIL_SHOWN]
         if shown:
             more = len(fresh) - len(shown)
-            alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
-                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''}"
-                  + ("" if kind == "сверка" else " — завести задачу (pantheon task new, ссылка на файл или id в тексте)"),
-                  "check")
+            tail = "" if kind == "сверка" else " — завести задачу (pantheon task new, ссылка на файл или id в тексте)"
+            if kind == "отчёт":  # metis-1382: файл, что выпал из набора и вернулся, тревогу заново не даёт — свёртка по файлу
+                for k, w in shown:
+                    alert_fold("tail-" + k, f"{TAIL_TEXT[kind]}: {w}{tail}", "check", window=TAIL_FOLD_WINDOW)
+            else:
+                alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
+                      f"{f' и ещё {more} (назову следующим проходом)' if more else ''}" + tail, "check")
         shown_all.update(k for k, _ in shown)
         # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
         keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
