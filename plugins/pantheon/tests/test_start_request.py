@@ -418,8 +418,13 @@ try:
             res = G["_hestia_by_request"]("metis-0001")
             FakeSub.rc = 2
             res2 = G["_hestia_by_request"]("metis-0001")
+            a0 = len(alerts_text())
+            G["_hestia_by_request"]("metis-0001", "заявка окна metis-pantheon")
+            wa = alerts_text()[a0:]
         finally:
             G["subprocess"] = real_sub
+        check("1409 _hestia_by_request по заявке окна: тревога «заявка окна <имя>: Гестия …», не «заявка Зевса»",
+              "заявка окна metis-pantheon: Гестия по задаче metis-0001" in wa and "заявка Зевса" not in wa, wa)
         argv, env = FakeSub.seen[0] if FakeSub.seen else ([], {})
         check("1066 _hestia_by_request: pantheon wake hestia --task <id> --from zeus, без роли окна; итог строкой",
               argv[1:] == ["wake", "hestia", "--task", "metis-0001", "--from", "zeus"] and argv[0].endswith("/bin/pantheon")
@@ -446,6 +451,18 @@ try:
             rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
             check("1409 wake hestia из окна направления без вашего слова → код 2, заявки нет",
                   rc == 2 and not os.path.exists(wreq_h), (rc, out, err))
+            word(3 * 3600)  # слово старое, но журнал окну закрыт (denyRead песочницы) — проверку делает проход
+            os.chmod(P.path("owner-log", "zeus.md"), 0o000)
+            try:
+                rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            finally:
+                os.chmod(P.path("owner-log", "zeus.md"), 0o644)
+            data = [json.loads(x) for x in open(wreq_h).read().splitlines()] if os.path.exists(wreq_h) else []
+            check("1409 (Б) owner-log/zeus.md окну не читается → заявка ложится без проверки слова, код 0",
+                  rc == 0 and "заявка принята" in out and len(data) == 1 and data[0]["by"] == "metis-pantheon",
+                  (rc, out, err, data))
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(wreq_h)
             word(60)
             rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
             data = [json.loads(x) for x in open(wreq_h).read().splitlines()] if os.path.exists(wreq_h) else []
@@ -459,12 +476,13 @@ try:
         calls = []
         G = P.take_start_requests.__globals__
         real = G["_hestia_by_request"]
-        G["_hestia_by_request"] = lambda tid: calls.append(tid) or "поднята"
+        whos = []
+        G["_hestia_by_request"] = lambda tid, who="заявка Зевса": calls.append(tid) or whos.append(who) or "поднята"
         try:
             got = dict(P.take_start_requests(doms, P.now()))
-            check("1409 проход: заявка Гестии из кэша окна → один вызов, файл снят",
-                  calls == ["metis-0001"] and got.get("hestia") == "поднята" and not os.path.exists(wreq_h),
-                  (calls, got))
+            check("1409 проход: заявка Гестии из кэша окна → один вызов, файл снят, тревога «заявка окна <имя>»",
+                  calls == ["metis-0001"] and got.get("hestia") == "поднята" and not os.path.exists(wreq_h)
+                  and whos == ["заявка окна metis-pantheon"], (calls, got, whos))
             for by, ago, why in (("zeus", 60, "by не имя окна"), ("metis-pantheon", 3 * 3600, "без вашего слова")):
                 word(ago)
                 with open(wreq_h, "w") as fh:
@@ -502,6 +520,15 @@ try:
               got == [(proj, 0), (None, "dir — не существующая папка с полным путём")]
               and ran == [f"|install --dir {proj}"] and os.listdir(pdir) == []
               and "отклонена" in alerts_text()[a0:], (got, ran, os.listdir(pdir)))
+        outer = os.path.join(_ROOT, "install-outer.json")  # жёсткая ссылка на файл вне кэша окна — не заявка окна
+        with open(outer, "w") as fh:
+            json.dump({"dir": proj}, fh)
+        os.link(outer, os.path.join(pdir, "install-cccc.req"))
+        got = M.take_install_requests(P.now())
+        ran2 = open(fake + ".log").read().splitlines() if os.path.exists(fake + ".log") else []
+        check("1409 проход: заявка на плагины — жёсткая ссылка (ссылок 2) → отклонена, project-tools не зван",
+              len(got) == 1 and got[0][0] is None and "ссылок 2" in got[0][1] and ran2 == ran
+              and os.listdir(pdir) == [], (got, ran2))
     finally:
         P.project_tools_cmd = real_ptc
     os.environ.pop("PANTHEON_ROLE")

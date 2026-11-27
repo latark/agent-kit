@@ -246,8 +246,8 @@ def _install_read(dfd, fname):
         return None, f"не открыть ({e.strerror or e})"
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > INSTALL_MAX:
-            return None, "не свой обычный файл или слишком большой"
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid() or st.st_size > INSTALL_MAX:
+            return None, f"не свой обычный файл, ссылок {st.st_nlink} или больше {INSTALL_MAX} байт"
         data = json.loads(os.read(fd, INSTALL_MAX + 1) or b"null")
     except (OSError, ValueError) as e:
         return None, f"не разобрать ({type(e).__name__})"

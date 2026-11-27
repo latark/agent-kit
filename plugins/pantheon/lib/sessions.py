@@ -778,8 +778,10 @@ def resume_request(target):
 
 def hestia_request(tid):
     """`pantheon wake hestia --task <id>` в окне Пританея, которому STATE/settings/run закрыт, → заявка hestia.req. Без
-    вашего слова в owner-log/zeus.md — отказ, код 2, и тревога. → 0, START_REFUSED, 1 (не записана)."""
-    if not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+    вашего слова в owner-log/zeus.md — отказ, код 2, и тревога. Окну направления песочница закрывает чтение журнала
+    (denyRead) — тогда заявка ложится без этой проверки: слово сверяют плановый проход (_req_word_problem) и start_gate.
+    → 0, START_REFUSED, 1 (не записана)."""
+    if _owner_log_readable("zeus") and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         P.alert(f"pantheon wake hestia --task {tid} из окна Пританея отклонён: нет вашего слова", "pantheon-start")
         print(f"pantheon wake hestia: отказ — {NO_WORD_WHY}", file=sys.stderr)
         return START_REFUSED
@@ -794,6 +796,18 @@ def hestia_request(tid):
         return 1
     print(f"pantheon wake hestia: заявка принята — Гестию по задаче {tid} поднимет плановый проход")
     return 0
+
+
+def _owner_log_readable(session):
+    """metis-1409: читается ли этому процессу owner-log/<session>.md. Закрыт на чтение (песочница окна направления,
+    PermissionError) — False; файла нет или иной сбой — True: тогда проверка слова идёт как раньше и откажет."""
+    try:
+        os.close(os.open(P.path("owner-log", session + ".md"), os.O_RDONLY | os.O_NONBLOCK))
+    except PermissionError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _hestia_lock_open():
@@ -860,14 +874,15 @@ def _take_window_hestia(t):
                 P.alert(f"заявка окна {w} на Гестию отклонена: {bad}", "watch")
                 out.append((HESTIA, bad))
                 continue
-            out.append((HESTIA, _hestia_by_request(items[-1]["task"])))
+            out.append((HESTIA, _hestia_by_request(items[-1]["task"], f"заявка окна {w}")))
         finally:
             os.close(dfd)
     return out
 
 
-def _hestia_by_request(tid):
-    """Плановый проход: Гестия по заявке Зевса — `pantheon wake hestia --task <id> --from zeus` вне окна. → итог строкой."""
+def _hestia_by_request(tid, who="заявка Зевса"):
+    """Плановый проход: Гестия по заявке Зевса или окна (who — начало тревоги) — `pantheon wake hestia --task <id>
+    --from zeus` вне окна. → итог строкой."""
     limit = P.watch_mod().start_timeout()
     try:
         r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "wake", HESTIA, "--task", tid, "--from", "zeus"],
@@ -876,7 +891,7 @@ def _hestia_by_request(tid):
         res = "поднята" if r.returncode == 0 else f"не вышло, код {r.returncode}" + (f": {tail[-1][:160]}" if tail else "")
     except subprocess.TimeoutExpired:
         res = f"pantheon wake hestia не уложился в {limit:.0f} с"
-    P.alert(f"заявка Зевса: Гестия по задаче {tid} — {res}", "watch")
+    P.alert(f"{who}: Гестия по задаче {tid} — {res}", "watch")
     return res
 
 
