@@ -54,6 +54,7 @@ cmprs (МБ, необязательно)}]); PANTHEON_FAKE_LOAD — нагруз
 нагрузка Mac не читаются: иначе тесты видели бы процессы и load владельца.
 """
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -476,7 +477,10 @@ def watch_check(agents, t):
     n_ab = sum(1 for r in rs if r[2] == "abandoned")
     n_ask = sum(1 for r in rs if r[2] == "ask")
     held = f", красная зона держится {fmt_age(t - alerted)} с прошлой строки" if same and alerted else ""
-    P.alert(f"виновники памяти ({'; '.join(reasons)}{held}), процессы старше {CULPRIT_HOURS} ч — процесс → чей → память → "
+    # metis-1383: те же долгие сессии при каждом повторе красной зоны (12 строк за 3 дня) — по набору процессов строка
+    # в сутки со счётчиком повторов; другой набор pid — новая строка
+    key = "culprits-" + hashlib.sha1(",".join(sorted(str(p["pid"]) for p, _, _, _ in rs)).encode()).hexdigest()[:12]
+    P.alert_fold(key, f"виновники памяти ({'; '.join(reasons)}{held}), процессы старше {CULPRIT_HOURS} ч — процесс → чей → память → "
             f"возраст: {table}{more}. Брошено: {n_ab}, своё живое: {n_ask}. Брошенное гасит плановый проход "
             "(`pantheon reap --auto`, раз в 30 мин); сразу или об остальном — Зевсу: задача и `pantheon wake hestia "
             "--task <id>` — Гестия погасит брошенное (`pantheon reap --apply`), об остальном спросит вас", "watch")
