@@ -661,7 +661,8 @@ def relay_zeus(agents, items, t):
 
 WAIT_CARD_AFTER = 300     # metis-1122: окно ждёт разрешения дольше 5 мин — карточка владельцу «Ждёт вас»
 WAIT_REPEAT_AFTER = 1800  # дольше 30 мин — повтор: уведомление владельцу и строка Зевсу в тревогах
-WAIT_REMIND_EVERY = 3600  # metis-1183: дальше — напоминание каждый час, пока окно ждёт (один повтор молчал 20 ч)
+WAIT_REMIND_EVERY = 86400  # metis-1183: дальше — напоминание, пока окно ждёт (один повтор молчал 20 ч); раз в сутки
+# на карточку (metis-1337, план 1332, строка 36): часовые дали 492 строки, 151 — от одной карточки
 UNKNOWN_WHY = "причина неизвестна"
 
 
@@ -760,7 +761,7 @@ def wait_cards(agents, waiting, t, covered=frozenset()):
                 mins = int((t - since) // 60)
                 card = f", карточка {rec['card']}" if rec.get("card") else ""
                 P.alert(f"окно {name} ждёт вас {mins} мин: {why}{card} — claude attach {sid}", "watch")
-                if first:  # macOS — один раз на ожидание; часовые — строкой Зевсу, дневной бюджет уведомлений цел
+                if first:  # macOS — один раз на ожидание; суточные — строкой Зевсу, дневной бюджет уведомлений цел
                     P.notify_soon(f"wait-repeat-{name}", f"{name} ждёт вас {mins} мин: {why[:80]}",
                                   group=f"session-{name}", once=True)
         P.write_json(sp, st)
@@ -3534,6 +3535,10 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     text = word_text(qid, ts, ans)
     if verb == "вернуть":  # как pantheon resume: метка, имя в «остановить всё», сброс самозапуска — затем подъём
         _word_unstop(name)
+    # metis-1329 Д1, решение «нет»: ответ, отклонённый меткой «остановлено вами» или недельным потолком, метку
+    # asks-answered не ставит — обе проверки стоят до word_answer_ghosts. Метка сняла бы «ждёт вас», и позднейший подъём
+    # (самозапуск после resume или сброса недели) поднял бы окно без строки «ответа на твой вопрос нет»: окно
+    # продолжило бы по догадке. Призрак остаётся «ждёт вас» на доске; ответ после снятия причины его поднимает.
     if os.path.exists(P.path("stopped", name)):
         return ("не исполняю: «остановлено вами» — снимает ответ «Да — вернуть " + name + "» или ваша команда "
                 "pantheon resume")
@@ -4199,11 +4204,46 @@ def respawn_recheck(name, sid, doms, since):
     return again
 
 
+def stale_windows(agents, doms, m):
+    """metis-1337: окно, поднятое со сборкой старше текущей (PANTHEON_BUILD файла запуска settings/run/<имя>.json против
+    отпечатка window_build_fp текущего settings/<окно>.json), — тревога Зевсу «перезапустить <окно>», по окну и
+    отпечатку не чаще раза в сутки (alert_daily). Отбор — как у перезапуска после плагинов (respawn_candidates без
+    отметки версии): имя Пантеона, не Зевс, не остановлено вами, фоновая и живая. Окно, которое ждёт перезапуска после
+    обновления плагинов (respawn.json), пропускается: его поднимут и так. Файл запуска без PANTHEON_BUILD (окно поднято
+    до metis-1337) или без файла окна — не сверяется. → список (имя, было, стало)."""
+    pending = {a["name"] for a in respawn_candidates(agents, doms, m)} if m else set()
+    out = []
+    for a in respawn_candidates(agents, doms, {"since": float("inf")}):  # без отметки версии: поднято когда угодно
+        name = a["name"]
+        if name in pending:
+            continue
+        env = (P.read_json(P.path("settings", "run", name + ".json"), {}) or {}).get("env") or {}
+        was, win = env.get("PANTHEON_BUILD"), env.get("PANTHEON_WINDOW")
+        if not isinstance(was, str) or not isinstance(win, str) or not P.SESSION_NAME.fullmatch(win):
+            continue
+        cur_path = P.path("settings", win + ".json")
+        if not os.path.isfile(cur_path):
+            continue
+        cur = P.window_build_fp(P.read_json(cur_path, {}))
+        if cur == was:
+            continue
+        out.append((name, was, cur))
+        P.alert_daily(f"window-stale-{name}-{cur}", f"Зевсу: перезапустить {name} — окно поднято со сборкой {was}, "
+                      f"текущая {cur} (исключения песочницы, запреты или правила окна {win} сменились, на ходу сессия "
+                      f"их не берёт). Сохраниться и подняться заново: попроси окно `pantheon saved`, затем pantheon "
+                      f"stop {name} и pantheon resume {name}", "watch")
+    return out
+
+
 def plugins_respawn(agents, doms, t):
     p = respawn_path("respawn.json")
     m = P.read_json(p, {})
-    if not isinstance(m, dict) or not m or P.maintenance_active():
+    if P.maintenance_active():
         return  # техперезапуск перезапускает всех сам
+    if agents:
+        stale_windows(agents, doms, m if isinstance(m, dict) else {})
+    if not isinstance(m, dict) or not m:
+        return
     if not agents:
         return  # пустой claude agents (сбой или перезапуск Claude Code) — не «все перезапущены»: отметку не снимаем
     since = float(m.get("since") or 0)

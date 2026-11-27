@@ -5393,7 +5393,19 @@ def maintenance_active():
 
 
 RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW", "PANTHEON_TASK",
-           "PANTHEON_TASK_DIRECTION")
+           "PANTHEON_TASK_DIRECTION", "PANTHEON_BUILD")
+
+
+def window_build_fp(data):
+    """metis-1337: отпечаток сборки окна — исключения песочницы (sandbox.excludedCommands), запреты (permissions.deny) и
+    правила классификатора (autoMode) файла settings/<окно>.json, которые domains_build пишет. Их запущенная сессия на
+    ходу не перечитывает. Разрешения grants.toml (allow, allowWrite, allowedDomains) в отпечаток не входят: они доходят
+    без перезапуска (write_window), а истёкшее разрешение иначе звало бы перезапуск. → 16 знаков sha256."""
+    data = data if isinstance(data, dict) else {}
+    sb, perm = data.get("sandbox") or {}, data.get("permissions") or {}
+    part = {"excluded": sb.get("excludedCommands") if isinstance(sb, dict) else None,
+            "deny": perm.get("deny") if isinstance(perm, dict) else None, "autoMode": data.get("autoMode")}
+    return hashlib.sha256(json.dumps(part, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
 
 
 def run_settings(name, role, window, origin, extra_env=None):
@@ -5407,6 +5419,8 @@ def run_settings(name, role, window, origin, extra_env=None):
     data["env"]["PANTHEON_SESSION"] = name
     data["env"]["PANTHEON_ROLE"] = role
     data["env"]["PANTHEON_WINDOW"] = window  # по нему сборка обновляет файл запущенной сессии (write_window)
+    # сборка, с которой окно поднято (metis-1337): write_window её сохраняет (RUN_ENV), watch сверяет с текущей
+    data["env"]["PANTHEON_BUILD"] = window_build_fp(data)
     data["env"].update(extra_env or {})  # wake hestia: PANTHEON_TASK, PANTHEON_TASK_DIRECTION — задача окна (metis-0562)
     run = path("settings", "run", name + ".json")
     write_json(run, data)

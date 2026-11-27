@@ -485,21 +485,23 @@ def test_wait_new_request_new_card_1183():
     check("окно coord-x ждёт вас 31 мин: Bash → grep x y" in e.alerts(), f"1183: нет повтора нового запроса: {e.alerts()}")
 
 
-def test_wait_hourly_reminder_1183():
-    """metis-1183: пока окно ждёт — после повтора через 30 мин напоминание каждый час строкой Зевсу, а не одно;
-    macOS — только на первом повторе (ревью argus #492, Б1: часовые съели бы дневной бюджет уведомлений)."""
+def test_wait_daily_reminder_1183():
+    """metis-1183, metis-1337: пока окно ждёт — после повтора через 30 мин напоминание строкой Зевсу не чаще раза в
+    сутки на карточку (было каждый час: 492 строки, план 1332 строка 36); macOS — только на первом повторе (ревью argus
+    #492, Б1)."""
     e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
     e.notify_mode(7200)
     e.run("watch", t=T0)
     e.run("watch", t=T0 + 1860)
-    e.run("watch", t=T0 + 1860 + 1800)
-    check(e.alerts().count("окно coord-x ждёт вас") == 1, f"1183: напоминание раньше часа: {e.alerts()}")
     e.run("watch", t=T0 + 1860 + 3660)
-    check(e.alerts().count("окно coord-x ждёт вас") == 2 and "ждёт вас 92 мин" in e.alerts(),
-          f"1183: нет часового напоминания: {e.alerts()}")
+    e.run("watch", t=T0 + 1860 + 86000)
+    check(e.alerts().count("окно coord-x ждёт вас") == 1, f"1337: напоминание чаще раза в сутки: {e.alerts()}")
+    e.run("watch", t=T0 + 1860 + 86460)
+    check(e.alerts().count("окно coord-x ждёт вас") == 2 and "ждёт вас 1472 мин" in e.alerts(),
+          f"1337: нет суточного напоминания: {e.alerts()}")
     sent = e.sent()
-    check("ждёт вас 31 мин" in sent and "ждёт вас 92 мин" not in sent,
-          f"1183: macOS не на первом повторе или на часовом: {sent!r}")
+    check("ждёт вас 31 мин" in sent and "ждёт вас 1472 мин" not in sent,
+          f"1183: macOS не на первом повторе или на суточном: {sent!r}")
 
 
 def test_wait_unknown_keeps_known_1183():
