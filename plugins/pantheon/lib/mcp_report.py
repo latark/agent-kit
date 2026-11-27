@@ -22,6 +22,11 @@
 засыпать всех координаторов); есть HTTP или SSE — файл и в первый раз. Серверы убраны совсем — без файла.
 Итог — строка `mcp-report:` в logs/tick.log; сбой проверки — тревога mcp-report-<направление>, успех её снимает.
 PANTHEON_DRYRUN=1 — ничего не делает.
+
+Плагины проекта по заявке окна (metis-1409): `project-tools install` в окне роли не ставит плагин (песочница), а кладёт
+заявку <кэш окна>/project-tools/install-*.req. take_install_requests — шаг плана watch «плагины проекта по заявкам окон»
+на каждом Mac — снимает её и вне окна зовёт `project-tools install --dir <папка>`: что ставить и одобрено ли, команда
+решает сама по карте стеков и настройкам проекта. Итог — строка `mcp-report:`, сбой — тревога.
 """
 import hashlib
 import json
@@ -224,3 +229,88 @@ def tick(t):
     text = "; ".join(texts)
     log(t, text)
     return text
+
+
+INSTALL_DIR = "project-tools"   # <кэш окна>/project-tools/install-*.req — пишет `project-tools install` в окне роли
+INSTALL_MAX = 4096
+INSTALL_PER_TICK = 2
+INSTALL_TIMEOUT = 600           # marketplace add + install + list, до CLAUDE_TIMEOUT каждая
+
+
+def _install_read(dfd, fname):
+    """Заявка окна на установку плагинов: свой обычный файл до INSTALL_MAX, JSON {dir, plugins, time}. → (папка, None)
+    или (None, причина)."""
+    try:
+        fd = os.open(fname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+    except OSError as e:
+        return None, f"не открыть ({e.strerror or e})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > INSTALL_MAX:
+            return None, "не свой обычный файл или слишком большой"
+        data = json.loads(os.read(fd, INSTALL_MAX + 1) or b"null")
+    except (OSError, ValueError) as e:
+        return None, f"не разобрать ({type(e).__name__})"
+    finally:
+        os.close(fd)
+    folder = data.get("dir") if isinstance(data, dict) else None
+    if not isinstance(folder, str) or not os.path.isabs(folder) or os.path.realpath(folder) != folder \
+            or not os.path.isdir(folder):
+        return None, "dir — не существующая папка с полным путём"
+    return folder, None
+
+
+def take_install_requests(t):
+    """Плановый проход вне окна (metis-1409): заявки окон ролей на плагины проекта → `project-tools install --dir D`.
+    Что ставить и одобрено ли, решает сама команда по карте стеков и настройкам проекта (заявка несёт только папку);
+    файл заявки снимается всегда. Итог — строка `mcp-report:` в logs/tick.log, сбой — тревога. → [(папка, код)]."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        return []
+    base = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox")
+    try:
+        windows = sorted(os.listdir(base))
+    except OSError:
+        return []
+    out = []
+    for w in windows:
+        try:
+            dfd = os.open(os.path.join(base, w, INSTALL_DIR), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            for fname in sorted(os.listdir(dfd)):
+                if len(out) >= INSTALL_PER_TICK:
+                    break
+                if not (fname.startswith("install-") and fname.endswith(".req")):
+                    continue
+                folder, bad = _install_read(dfd, fname)
+                try:
+                    os.unlink(fname, dir_fd=dfd)
+                except OSError:
+                    pass
+                if bad:
+                    P.alert(f"заявка окна {w} на плагины проекта отклонена: {bad}", WHO)
+                    out.append((None, bad))
+                    continue
+                out.append((folder, _install_run(w, folder, t)))
+        finally:
+            os.close(dfd)
+    return out
+
+
+def _install_run(w, folder, t):
+    cmd = P.project_tools_cmd()
+    if not cmd:
+        P.alert(f"заявка окна {w}: project-tools не найден — плагины {P.tilde(folder)} не поставлены", WHO)
+        return None
+    try:
+        r = subprocess.run([cmd, "install", "--dir", folder], capture_output=True, text=True, timeout=INSTALL_TIMEOUT,
+                           env=P.claude_env(), stdin=subprocess.DEVNULL)
+        code, lines = r.returncode, ((r.stderr or "") + "\n" + (r.stdout or "")).strip().splitlines()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        code, lines = None, [type(e).__name__]
+    last = lines[-1][:200] if lines else "без вывода"
+    log(t, f"плагины {P.tilde(folder)} по заявке окна {w}: код {code}: {last}")
+    if code != 0:
+        P.alert(f"плагины проекта {P.tilde(folder)} (заявка окна {w}) не поставлены: код {code}: {last}", WHO)
+    return code

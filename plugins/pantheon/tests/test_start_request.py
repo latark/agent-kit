@@ -477,6 +477,33 @@ try:
                       not calls and "отклонена" in alerts_text()[a0:] and not os.path.exists(wreq_h), (calls, got))
         finally:
             G["_hestia_by_request"] = real
+
+    # metis-1409: заявка окна на плагины проекта → project-tools install --dir вне окна (без роли), файл снят
+    M = P.mcp_report_mod()
+    pdir = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "metis-pantheon", "project-tools")
+    os.makedirs(pdir, exist_ok=True)
+    proj = os.path.realpath(os.path.join(_ROOT, "proj-ext"))
+    os.makedirs(proj, exist_ok=True)
+    fake = os.path.join(_ROOT, "fake-project-tools")
+    with open(fake, "w") as fh:
+        fh.write('#!/bin/sh\necho "$PANTHEON_ROLE|$*" >> "' + fake + '.log"\necho "  + плагин установлен"\n')
+    os.chmod(fake, 0o755)
+    real_ptc = P.project_tools_cmd
+    P.project_tools_cmd = lambda: fake
+    try:
+        with open(os.path.join(pdir, "install-aaaa.req"), "w") as fh:
+            json.dump({"dir": proj, "plugins": ["x@y"], "time": 1}, fh)
+        with open(os.path.join(pdir, "install-bbbb.req"), "w") as fh:
+            json.dump({"dir": "relative/path"}, fh)
+        a0 = len(alerts_text())
+        got = M.take_install_requests(P.now())
+        ran = open(fake + ".log").read().splitlines() if os.path.exists(fake + ".log") else []
+        check("1409 проход: заявка окна на плагины → project-tools install --dir <папка> без роли, код 0; файлы сняты",
+              got == [(proj, 0), (None, "dir — не существующая папка с полным путём")]
+              and ran == [f"|install --dir {proj}"] and os.listdir(pdir) == []
+              and "отклонена" in alerts_text()[a0:], (got, ran, os.listdir(pdir)))
+    finally:
+        P.project_tools_cmd = real_ptc
     os.environ.pop("PANTHEON_ROLE")
     with contextlib.suppress(FileNotFoundError):
         os.unlink(P.path("owner-log", "zeus.md"))
