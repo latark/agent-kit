@@ -160,7 +160,8 @@ write = ["~/projects/br", "~/projects", "~/projects/side"]
     os.makedirs(run, exist_ok=True)
     sess = dict(win("athena-shop"))
     sess["env"] = dict(sess["env"], PANTHEON_SESSION="athena-shop", PANTHEON_ROLE="domain-coordinator",
-                       PANTHEON_ORIGIN="hq", PANTHEON_WINDOW="athena-shop")
+                       PANTHEON_ORIGIN="hq", PANTHEON_WINDOW="athena-shop",
+                       PANTHEON_BUILD="0123456789abcdef")
     sess["permissions"] = dict(sess["permissions"], allow=[x for x in sess["permissions"]["allow"]
                                                            if x != "Bash(pnpm test *)"])
     other = {"env": {"PANTHEON_WINDOW": "workshop"}, "x": 1}
@@ -176,6 +177,8 @@ write = ["~/projects/br", "~/projects", "~/projects/side"]
           and "Bash(pnpm test *)" in r["permissions"]["allow"])
     check("файл сессии: env сессии сохранён", r["env"].get("PANTHEON_ORIGIN") == "hq"
           and r["env"].get("PANTHEON_ROLE") == "domain-coordinator" and r["env"].get("PANTHEON_WINDOW") == "athena-shop")
+    check("файл сессии: PANTHEON_BUILD сохранён (metis-1368, RUN_ENV)",
+          r["env"].get("PANTHEON_BUILD") == "0123456789abcdef")
     check("файл сессии мастерской обновлён по своему окну",
           "Bash(make check)" in json.load(open(os.path.join(run, "ws-task.json")))["permissions"]["allow"])
 

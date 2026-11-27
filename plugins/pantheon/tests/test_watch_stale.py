@@ -69,6 +69,22 @@ def test_stale_window_alert_1337():
     check("перезапустить ss-dir" not in e2.alerts(), f"1337: тревога у остановленного вами: {e2.alerts()}")
 
 
+def test_stale_window_broken_run_file_1368():
+    """metis-1368 Д2: файл запуска — список, env — строка, PANTHEON_BUILD не отпечаток: проход watch не падает; мусор
+    в тексте тревоги не печатается (вместо него «неизвестной»)."""
+    e = Env()
+    e.direction("br-dir")
+    e.agents([bg("br-dir", "done", "abab0003-1", pid=51)])
+    os.makedirs(e.st("settings", "run"), exist_ok=True)
+    for body in ([1, 2], {"env": "строка"}, {"env": ["x"]}, "str"):
+        json.dump(body, open(e.st("settings", "run", "br-dir.json"), "w"))
+        r = e.run("watch", t=T0)
+        check("Traceback" not in (r.stderr or "") and r.returncode == 0, f"1368: проход упал на {body!r}: {r.stderr}")
+    _run_file(e, "br-dir", "мусор<!>")
+    e.run("watch", t=T0 + 120)
+    check("мусор<!>" not in e.alerts() and "сборкой неизвестной" in e.alerts(), f"1368: was в тексте: {e.alerts()}")
+
+
 def test_word_refused_keeps_ghost_asking_1329():
     """metis-1329 Д1, решение «нет»: ответ «Да — запустить <имя>», отклонённый меткой «остановлено вами» или недельным
     потолком, метку asks-answered не ставит — призрак остаётся «ждёт вас», а не поднимается позже самозапуском без
