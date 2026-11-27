@@ -104,7 +104,7 @@ def alive(pat):
 
 SPIN = "python3 -c 'while True: pass'"   # одна строка: .pantheon-verify читается построчно
 
-res, dt = run("echo started-ok; sleep 31337")
+res, dt = run("echo started-ok; sleep 31347")
 log = open(res["log"]).read() if res.get("log") else ""
 check("молчащий sleep гасится по тишине: failed, why «тишина» и последняя строка",
       res.get("state") == "failed" and "тишина" in res.get("why", "") and "started-ok" in res["why"]
