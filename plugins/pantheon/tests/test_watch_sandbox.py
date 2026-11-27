@@ -360,6 +360,46 @@ def test_sandbox_clean_0620():
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_sandbox_clean_readonly_dirs_1379():
+    """metis-1379: запись с папками без права записи (0o555/0o500 — след тестов) раньше не удалялась каждый проход
+    («не удалось 57»); теперь уходит, ссылка внутри не открывает цель."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    root = os.path.join(base, "cache")
+    outside = os.path.join(base, "outside")
+    os.makedirs(outside)
+    os.chmod(outside, 0o500)
+    old = time.time() - 20 * 86400
+    try:
+        p = os.path.join(root, "argus", "tmp", "run-tests-x")
+        deep = os.path.join(p, "a", "b")
+        os.makedirs(deep)
+        open(os.path.join(deep, "f"), "w").write("x")
+        os.symlink(outside, os.path.join(p, "a", "lnk"))
+        for q in (os.path.join(deep, "f"), os.path.join(p, "a", "lnk")):
+            os.utime(q, (old, old), follow_symlinks=False)
+        for q in (deep, os.path.join(p, "a"), p):
+            os.utime(q, (old, old))
+        os.chmod(deep, 0o555)
+        os.chmod(os.path.join(p, "a"), 0o500)
+        os.utime(deep, (old, old))
+        os.utime(os.path.join(p, "a"), (old, old))
+        removed, failed = w.sandbox_clean(root, time.time(), set(), days=7)
+        check(not os.path.exists(p) and removed == 1 and failed == 0,
+              f"запись с read-only папками не убрана: {removed} {failed}")
+        check(os.path.isdir(outside) and stat.S_IMODE(os.stat(outside).st_mode) == 0o500,
+              "цель ссылки тронута (права или удаление)")
+    finally:
+        os.chmod(outside, 0o700)
+        for dp, dns, _fns in os.walk(base):
+            for d in dns:
+                with contextlib.suppress(OSError):
+                    os.chmod(os.path.join(dp, d), 0o700)
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_sandbox_clean_swap_0620():
     """Окно подменяет папку части ссылкой наружу между проверкой и удалением: цель снаружи цела."""
     import importlib
