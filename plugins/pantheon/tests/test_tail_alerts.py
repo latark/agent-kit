@@ -231,8 +231,10 @@ def main():
     run(env, "check", "--quiet", t=T0 + 360)
     run(env, "check", "--quiet", t=T0 + 420)
     ls = lines_with(home, "inbox")[n0:]
-    check("14 новых файлов: первая тревога называет 12 и «и ещё 2», вторая — оставшиеся 2, третьего прохода тревоги нет",
-          len(ls) == 2 and "и ещё 2" in ls[0]
+    # metis-1382: файл inbox — своя строка со свёрткой (alert_fold по файлу), а не одна на проход: 12 строк первым
+    # проходом (TAIL_SHOWN), оставшиеся 2 — вторым, третий проход новых строк не даёт, «и ещё» в строках файлов нет
+    check("14 новых файлов: каждый назван одной строкой — 12 первым проходом, 2 вторым, третий проход молчит",
+          len(ls) == 14 and not any("и ещё" in ln for ln in ls) and len(lines_with(home, "inbox")[n0:]) == 14
           and all(sum(f"research-many-{i:02d}.md" in ln for ln in ls) == 1 for i in range(14)), ls)
 
     # --- чистые функции

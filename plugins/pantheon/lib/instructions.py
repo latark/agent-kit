@@ -78,9 +78,7 @@ def instructions_check(quiet=False):
     for key, value, msg, alerting in cut:
         if alerting:
             P.alert_once("instr-" + key, value, msg, "instructions")
-    if long_:
-        P.alert_once("instr-long", ",".join(sorted(long_)), f"Claude: инструкции длиннее {P.CLAUDE_LINES} строк (хуже "
-                   f"соблюдаются): {'; '.join(long_)} — разнести по .claude/rules или вложенным файлам", "instructions")
-    else:
-        P.clear_once("instr-long")
+    if long_:  # metis-1385: в тексте — число строк, оно растёт с каждой правкой файла; свёртка по ключу, не по значению
+        P.alert_fold("instr-long", f"Claude: инструкции длиннее {P.CLAUDE_LINES} строк (хуже соблюдаются): "
+                     f"{'; '.join(long_)} — разнести по .claude/rules или вложенным файлам", "instructions")
     return 0

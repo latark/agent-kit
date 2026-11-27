@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # noqa: E402 — CLI pantheon только на Python 3.11+
@@ -34,6 +35,7 @@ RUN_PY = os.path.join(LIB, "run.py")
 sys.path.insert(0, LIB)
 import boardtext as B  # noqa: E402
 import plancheck as C  # noqa: E402
+import tasks as TK  # noqa: E402
 
 T0 = 1_792_000_000
 results = []
@@ -266,8 +268,51 @@ def test_board_rows():
         shutil.rmtree(tmp, True)
 
 
+def test_uncovered_unread():
+    """metis-1394: у направления два плана, один не прочитался — пачки направления не «вне плана»."""
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="plan-unread-"))
+    try:
+        d = os.path.join(tmp, "directions", "metis-pantheon")
+        os.makedirs(d)
+        with open(os.path.join(d, "plan-a.md"), "w", encoding="utf-8") as fh:
+            fh.write("# План\n\n## 1. Пачка А «первая»\n\nstory: metis-0200\n\n| задача |\n|---|\n| 0001 |\n")
+        story = lambda sid: (f"/x/{sid}.md", head(sid, "story", "doing", title="Пачка: " + sid), "")  # noqa: E731
+        tasks = {sid: story(sid) for sid in ("metis-0100", "metis-0200")}
+        now = time.time()
+        reg = os.path.join(tmp, "directions.toml")
+        with open(reg, "w", encoding="utf-8") as fh:  # планы ищутся только у направлений из реестра (без plans — папка)
+            fh.write('[[direction]]\nname = "metis-pantheon"\n')
+        base = C.uncovered_packs(tmp, tasks, now, TK)
+        check("uncovered_packs: один читаемый план — пачка вне раздела названа (база)", base == ["metis-0100"], base)
+        # листинг plans в реестре: второй «план» — папка, чтение падает (OSError)
+        with open(os.path.join(tmp, "directions.toml"), "w", encoding="utf-8") as fh:
+            fh.write('[[direction]]\nname = "metis-pantheon"\nplans = ["directions/metis-pantheon/plan-a.md", '
+                     '"directions/metis-pantheon/broken"]\n')
+        os.makedirs(os.path.join(d, "broken"))
+        got = C.uncovered_packs(tmp, tasks, now, TK)
+        check("uncovered_packs: второй план не прочитан (реестр) — пачки направления не «вне плана»", got == [], got)
+        with open(reg, "w", encoding="utf-8") as fh:  # снова без поля plans: план ищется в папке направления
+            fh.write('[[direction]]\nname = "metis-pantheon"\n')
+        os.rmdir(os.path.join(d, "broken"))
+        bad = os.path.join(d, "plan-b.md")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("# План\n\n## 1. Пачка Б «вторая»\n\nstory: metis-0100\n\n| задача |\n|---|\n| 0002 |\n")
+        os.chmod(bad, 0)
+        if os.access(bad, os.R_OK):  # root читает всё: случай не воспроизвести
+            print("пропущено: файл плана читается, несмотря на chmod 0")
+        else:
+            got = C.uncovered_packs(tmp, tasks, now, TK)
+            check("uncovered_packs: plan-b.md не читается (папка направления) — пачки направления не «вне плана»", got == [], got)
+        os.chmod(bad, 0o644)
+        got = C.uncovered_packs(tmp, tasks, now, TK)
+        check("uncovered_packs: оба плана читаются — обе пачки покрыты", got == [], got)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_sections()
+    test_uncovered_unread()
     test_check()
     test_cli()
     test_board_rows()

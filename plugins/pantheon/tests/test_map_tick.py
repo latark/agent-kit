@@ -131,6 +131,10 @@ class World:
             stamp=lambda t=None: time.strftime("%Y-%m-%d %H:%M", time.localtime(t)),
             alert_once=lambda key, value, text, who="pantheon", **kw: self.alerts.append((key, value, text, who, kw)),
             clear_once=lambda key: self.cleared.append(key),
+            # metis-1386: сетевую серию считает настоящий P.alert_net (test_alert_repeat.py); здесь — прежнее поведение
+            alert_net=lambda key, fail, text, who="pantheon", **kw: (self.alerts.append((key, fail, text, who, kw))
+                                                                     if fail else self.cleared.append(key)),
+            net_error=lambda text: False,
             pid_alive=lambda pid: pid == os.getpid(),
             merge_mod=lambda: M, release_tick_mod=lambda: RT)
         M.allowed_repos = lambda: {REPO, "latark/other"}

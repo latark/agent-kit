@@ -95,6 +95,8 @@ def prepare(repo, copy):
     for value in ("", f"!{gh} auth git-credential"):
         git(copy, "config", "--local", "--add", "credential.helper", value)
     code, out = git(copy, "fetch", "-q", "--no-tags", "origin", "main")
+    if code != 0 and P.net_error(out):  # metis-1386: разовый обрыв сети — один повтор
+        code, out = git(copy, "fetch", "-q", "--no-tags", "origin", "main")
     if code != 0:
         return None, f"fetch origin main: {out[-200:]}"
     code, sha = git(copy, "rev-parse", "FETCH_HEAD")
@@ -274,8 +276,6 @@ def tick(t):
         log(t, text)
     st["last"] = text
     P.write_json(state_file(), st)
-    if fails:
-        P.alert_once(ALERT_KEY, "; ".join(fails)[:300], "выпуск без Actions: " + "; ".join(fails)[:300], WHO)
-    else:
-        P.clear_once(ALERT_KEY)
+    # metis-1386: обрыв сети (fetch SSL_ERROR_SYSCALL) — тревога на третьем проходе подряд, не на первом
+    P.alert_net(ALERT_KEY, "; ".join(fails)[:300], "выпуск без Actions: " + "; ".join(fails)[:300], WHO)
     return text

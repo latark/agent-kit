@@ -83,6 +83,59 @@ def fold_cases(P, out):
         fh.write("не json")
     out("битая метка — строка пишется", P.alert_fold("bad", "битая метка", "watch") is True
         and len(lines(P, "битая метка")) == 1)
+    clear_cases(P, out)
+
+
+def clear_cases(P, out):
+    """metis-1396: причина ушла и вернулась — без старого «×N»; metis-1397: закрытая STATE/once не роняет, ключ — с причиной."""
+    key = "fresh-tab-win-aaaaaaaa"
+    at(T0)
+    P.alert_fold(key, "win: свежий старт не сделан — вкладка", "pantheon")
+    for i in range(3):
+        at(T0 + 60 * (i + 1))
+        P.alert_fold(key, "win: свежий старт не сделан — вкладка", "pantheon")
+    P.alert_fold("fresh-tab-win2-aaaaaaaa", "win2: другое окно", "pantheon")
+    P.alert_fold_clear("fresh-tab-win-")
+    out("alert_fold_clear: чужое окно (другой префикс) не сброшено", os.path.exists(P.once_path("fold-fresh-tab-win2-aaaaaaaa")))
+    at(T0 + 2 * DAY)
+    P.alert_fold(key, "win: свежий старт не сделан — вкладка", "pantheon")
+    got = lines(P, "win: свежий старт не сделан")
+    out("причина ушла (alert_fold_clear) и вернулась — строка без старого «повторов ×3»",
+        len(got) == 2 and "повторов" not in got[1], got)
+    key2 = "fresh-tab-win-bbbbbbbb"
+    at(T0 + 3 * DAY)
+    P.alert_fold(key2, "win: вернулась", "pantheon")
+    at(T0 + 3 * DAY + 60)
+    P.alert_fold(key2, "win: вернулась", "pantheon")
+    at(T0 + 4 * DAY + 100)
+    P.alert_fold(key2, "win: вернулась", "pantheon")
+    out("без alert_fold_clear счётчик показан (контроль)", "повторов ×1" in "".join(lines(P, "win: вернулась")),
+        lines(P, "win: вернулась"))
+    # закрытая папка отметок: тревога уходит, исключения нет
+    once = os.path.dirname(P.once_path("x"))
+    os.makedirs(once, exist_ok=True)
+    os.chmod(once, 0o500)
+    try:
+        if os.access(once, os.W_OK):
+            print("пропущено: папка once пишется несмотря на chmod 500 (root)")
+        else:
+            at(T0 + 10 * DAY)
+            try:
+                a = P.alert_fold("ro-fold", "закрытая once: fold", "watch")
+                b = P.alert_daily("ro-daily", "закрытая once: daily", "watch")
+                err = ""
+            except OSError as e:
+                a = b = None
+                err = f"{type(e).__name__}: {e}"
+            out("STATE/once закрыта для записи: alert_fold и alert_daily не падают, строки записаны",
+                err == "" and a is True and b is None and len(lines(P, "закрытая once: fold")) == 1
+                and len(lines(P, "закрытая once: daily")) == 1, err or lines(P, "закрытая once"))
+    finally:
+        os.chmod(once, 0o700)
+    src = open(os.path.join(os.path.dirname(P.__file__), "sessions.py"), encoding="utf-8").read()
+    out("fresh-tab: ключ тревоги несёт хеш причины (разные причины — разные строки)",
+        'P.alert_fold(f"fresh-tab-{name}-{hashlib.sha1(why.encode()).hexdigest()[:8]}"' in src)
+    out("fresh-tab: вкладки нет — счётчик сбрасывается", 'P.alert_fold_clear(f"fresh-tab-{name}-")' in src)
 
 
 def sweep_cases(P, w, out):
@@ -128,6 +181,12 @@ def run(lib, tag):
 MUTANTS = {
     "без проверки окна": ("pantheon.py", "if last is not None and last <= t < last + window:", "if False:"),
     "без счётчика": ("pantheon.py", "if last is not None and n > 0:", "if False:"),
+    "запись метки fold без защиты": ("pantheon.py", '_mark_write(mark, json.dumps({"t": t, "n": 0}))',
+                                     'write_atomic(mark, json.dumps({"t": t, "n": 0}))'),
+    "запись метки daily без защиты": ("pantheon.py", "    _mark_write(mark, str(t))\n", "    write_atomic(mark, str(t))\n"),
+    "fresh-tab без причины в ключе": ("sessions.py", "fresh-tab-{name}-{hashlib.sha1(why.encode()).hexdigest()[:8]}",
+                                      "fresh-tab-{name}"),
+    "fresh-tab без сброса": ("sessions.py", "P.alert_fold_clear(", "(lambda *_: None)("),
     "уборка через P.alert": ("watch.py", 'P.alert_fold("sandbox-sweep-failed", msg, "watch")', 'P.alert(msg, "watch")'),
 }
 

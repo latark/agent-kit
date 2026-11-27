@@ -84,7 +84,7 @@ def run_job(name):
             log = P.path("logs", name + ".log")
             started = time.time()
             started_at = P.now()
-            timeout = float(job.get("timeout", 600))
+            timeout = max(float(job.get("timeout", 600)), TIMEOUT_FLOOR.get(name, 0))
             # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, env=P.claude_env() if os.path.basename(argv[0]) == "claude" else P.run_env(), cwd=P.HOME,
@@ -165,6 +165,10 @@ def run_direction_job(name, job):
         return 0
 
 
+# metis-1384: проход check обычно 2–15 с (logs/check.log), но под нагрузкой Mac (heavy-очередь, свопинг) доходил до
+# 52–60 с и обрывался по timeout = 60 из schedule.toml (код 124, тревога). Читает он много (задачи, inbox, журналы), а не
+# зависает, поэтому срок поднят полом здесь: schedule.toml лежит у владельца, а пол действует при любом его значении.
+TIMEOUT_FLOOR = {"check": 180}
 TEMPFAIL_DEFAULT = "нет сети или GitHub недоступен"
 
 

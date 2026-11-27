@@ -2254,6 +2254,29 @@ def _open_dir(name, dir_fd=None):
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
 
 
+def _unlock_tree(name, dir_fd):
+    """metis-1379: тесты оставляют в кэше папки без права записи (0o555, 0o500): rmtree в них падает EACCES, и те же
+    57 записей не удалялись каждый проход. Возвращает владельцу rwx на папках записи (по дескрипторам, ссылки не
+    трогаем: цель ссылки чужая). Ошибки глотаем: что не открылось, удалит повторный rmtree или останется в счёте."""
+    try:
+        top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+            top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(top)
+        return
+    os.close(top)
+    with contextlib.suppress(OSError):
+        os.chmod(name, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+    for _dp, dirs, _files, fd in os.fwalk(name, dir_fd=dir_fd, follow_symlinks=False,
+                                          onerror=lambda e: None):
+        for d in dirs:
+            with contextlib.suppress(OSError):
+                if stat.S_ISDIR(os.stat(d, dir_fd=fd, follow_symlinks=False).st_mode):
+                    os.chmod(d, 0o700, dir_fd=fd, follow_symlinks=False)
+
+
 def sandbox_clean(root, t, opened, days=None):
     """Убирает в <root>/<окно>/{tmp,npm,corepack,logs} прямые записи старше days дней, которых не держит процесс
     (opened — множество путей из lsof). Окно может подменить папку ссылкой между проверкой и удалением (проход идёт
@@ -2296,6 +2319,7 @@ def sandbox_clean(root, t, opened, days=None):
                                     os.unlink(name, dir_fd=part_fd)
                                 removed += 1
                             except OSError:
+                                _unlock_tree(name, part_fd)
                                 with contextlib.suppress(OSError):
                                     shutil.rmtree(name, ignore_errors=True, dir_fd=part_fd)
                                 try:
@@ -2747,6 +2771,15 @@ def zeus_clean(agents, t):
     if hold:  # защиты — раньше шести условий: ни очистки, ни напоминания
         return zeus_trace(st, stp, t, a, [(0, hold)] + miss, n, "пропуск")
     if not miss:
+        # metis-1380: копия Зевса во вкладке терминала (в claude agents без id; видна по реестру сессий) — свежий старт
+        # её не гасит и каждый час падал кодом 1 с двумя тревогами. Не пытаемся: след в zeus-clean.json и одна строка
+        # в сутки, решает владелец (перейти во вкладку или закрыть её).
+        tabs = [x for x in P.live_copies("zeus", agents) if not x.get("id")]
+        if tabs:
+            P.alert_daily("zeus-clean-tab", f"очистка Зевса не сделана: копия открыта во вкладке терминала (pid "
+                          f"{tabs[0].get('pid')}), контекст {n // 1000} тыс. — перейдите в неё или закройте её; "
+                          "дежурный не повторяет попытку", "watch")
+            return zeus_trace(st, stp, t, a, [(0, "копия Зевса во вкладке терминала — решает человек")], n, "пропуск")
         f = st.get("failed") or {}
         if f.get("sid") == a["sessionId"] and t - float(f.get("t") or 0) < ZEUS_REMIND_MIN * 60:
             # прошлая попытка с этой сессией не вышла — повтор не чаще раза в час
