@@ -16,7 +16,9 @@
     пути из копии: открытые процессом (`open`, импорт тоже — метка «r»), запущенные им программы и их аргументы
     (`subprocess.Popen`, `os.exec`, `os.posix_spawn`, `os.spawn`) и источники копирования (`shutil.copyfile`,
     `shutil.copytree`) — метка «o». Пустой аргумент и аргумент с переводом строки (текст `python -c …`) — не путь и не
-    пишутся: от текущей папки они раскрывались в папку плагина и связывали тест со всеми её файлами (metis-0791);
+    пишутся: от текущей папки они раскрывались в папку плагина и связывали тест со всеми её файлами (metis-0791).
+    Относительный аргумент `subprocess.Popen` — от его `cwd=`, а не от папки теста: `git push .` или `git add .` во
+    временном репозитории иначе раскрывались в папку плагина (metis-1390);
   - sh — строка перед первой командой (после #! и шапки комментариев): `printf <путь> >> метки`.
 Путь вшит в метку, поэтому копия плагина, которую тест сделал сам (кэш плагина, установка), отчитывается тем же путём.
 Папка среди путей «o» (copytree, `cp -R папка`, `git -C папка`) — все файлы под ней: тест, что копирует плагин целиком,
@@ -92,7 +94,7 @@ if not getattr(sys, "_rt_hooked", False):
     sys._rt_hooked = True
     _busy, _seen = [False], set()
 
-    def _rt_rel(p):
+    def _rt_rel(p, base=None):
         if isinstance(p, int):
             return None
         try:
@@ -105,7 +107,7 @@ if not getattr(sys, "_rt_hooked", False):
             return None
         if not os.path.isabs(p):
             try:
-                p = os.path.join(os.getcwd(), p)
+                p = os.path.join(base or os.getcwd(), p)
             except Exception:
                 return None
         p = os.path.normpath(p)
@@ -117,10 +119,21 @@ if not getattr(sys, "_rt_hooked", False):
     def _rt_hook(ev, args):
         if _busy[0]:
             return
-        kind = "o "
+        kind, base = "o ", None
         if ev == "open":
             cands, kind = args[:1], "r "
-        elif ev in ("subprocess.Popen", "os.exec", "os.posix_spawn"):
+        elif ev == "subprocess.Popen":
+            # (executable, args, cwd, env): относительный аргумент — от cwd процесса, а не теста (metis-1390): `git
+            # push .` и `git add .` во временном репозитории иначе связывали тест со всей папкой плагина
+            a = args[1] if len(args) > 1 else ()
+            cands = [args[0], *(a if isinstance(a, (list, tuple)) else [a])]
+            cwd = args[2] if len(args) > 2 else None
+            if cwd is not None and not isinstance(cwd, int):
+                try:
+                    base = os.path.join(os.getcwd(), os.fsdecode(cwd))
+                except Exception:
+                    return
+        elif ev in ("os.exec", "os.posix_spawn"):
             a = args[1] if len(args) > 1 else ()
             cands = [args[0], *(a if isinstance(a, (list, tuple)) else [a])]
         elif ev == "os.spawn":
@@ -133,7 +146,7 @@ if not getattr(sys, "_rt_hooked", False):
         _busy[0] = True
         try:
             for c in cands:
-                r = _rt_rel(c)
+                r = _rt_rel(c, base)
                 if r and not r.startswith(".rt/") and kind + r not in _seen:
                     _seen.add(kind + r)
                     _rt_rec(kind + r)
