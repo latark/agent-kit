@@ -36,6 +36,9 @@ if os.environ.get("STUB_BAD"):
     sys.exit(2)
 out = []
 if "--isolated" not in sys.argv:  # обычный ruff check . — ошибки по меткам «# lint КОД» во всех .py папки
+    if os.environ.get("STUB_CRASH"):  # JSON без location: храповик падает трассировкой (metis-0878, Д3)
+        print(json.dumps([{"code": "F401"}]))
+        sys.exit(0)
     for d, _, names in os.walk("."):
         for n in sorted(x for x in names if x.endswith(".py")):
             for i, line in enumerate(open(os.path.join(d, n), encoding="utf-8"), 1):
@@ -209,6 +212,23 @@ def t_move():
           r.stdout)
 
 
+def t_rename():
+    """Д2 (metis-0878): переименование функции — тот же перенос: запись базы свободна, если число не выросло."""
+    root = started({"a.py": "def f():  # cx C901=20\n    pass\n"})
+    write(root, {"a.py": "def g():  # cx C901=20\n    pass\n"})
+    r = run(root)
+    check("функция переименована в том же файле с тем же числом — код 0", r.returncode == 0, r.stdout)
+    write(root, {"a.py": "def g():  # cx C901=21\n    pass\n"})
+    r = run(root)
+    check("переименованная функция выросла — код 1", r.returncode == 1 and "a.py" in r.last, r.stdout)
+    write(root, {"a.py": "x = 1\n", "c.py": "def g():  # cx C901=20\n    pass\n"})
+    r = run(root)
+    check("другое имя в другом файле — не перенос, код 1", r.returncode == 1 and "c.py" in r.last, r.stdout)
+    write(root, {"a.py": "def g():  # cx C901=20\n    pass\n\n\ndef h():  # cx C901=20\n    pass\n", "c.py": "x = 1\n"})
+    r = run(root)
+    check("две новые функции на одну запись базы — код 1 (запись одна)", r.returncode == 1 and "a.py" in r.last, r.stdout)
+
+
 def t_cycles():
     files = {"a.py": "import b\n", "b.py": "x = 1\n", "k1.py": "import k2\n", "k2.py": "import k1\n",
              "m1.py": "import m2\n", "m2.py": "import m1\n"}
@@ -302,6 +322,20 @@ def t_mode():
     r = runner_in(root)
     check("run-tests в режиме warn: строка предупреждения, код тестов не меняется", r[0] == 0 and "предупреждение" in r[1],
           r[1][-600:])
+    write(root, {"plugins/pantheon/scripts/lint-ratchet-mode": "FAIL\n"})
+    r = run(root, env={"LINT_RATCHET_MODE": ""})
+    check("Д4: слово режима в файле — без учёта регистра: «FAIL» — отказ, код 1", r.returncode == 1 and "отказ" in r.last,
+          r.stdout)
+    write(root, {"plugins/pantheon/scripts/lint-ratchet-mode": "warn\n"})
+    r = run(root, env={"LINT_RATCHET_MODE": "FAIL"})
+    check("Д4: «FAIL» в переменной при warn в файле — отказ, код 1", r.returncode == 1 and "отказ" in r.last, r.stdout)
+    r = run(root, env={"LINT_RATCHET_MODE": "", "STUB_CRASH": "1"})
+    check("Д3: сбой самого храповика в warn — код 0 и «предупреждение» (не 1 и не 2)",
+          r.returncode == 0 and "сбой самого храповика" in r.stdout and "предупреждение" in r.stdout, r.stdout + r.stderr)
+    write(root, {"plugins/pantheon/scripts/lint-ratchet-mode": "fail\n"})
+    r = run(root, env={"LINT_RATCHET_MODE": "", "STUB_CRASH": "1"})
+    check("Д3: сбой самого храповика в fail — код 1", r.returncode == 1 and "сбой самого храповика" in r.stderr + r.stdout,
+          r.stdout + r.stderr)
 
 
 def runner_in(root):
@@ -403,6 +437,19 @@ def t_run_tests():
     check("run-tests --shard 2/2: храповика нет (ни строки, ни кода), пустая часть — код 0",
           r.returncode == 0 and "храповик" not in r.stdout and "lint_ratchet" not in r.stdout
           and "часть 2/2: файлов нет" in r.stdout, r.stdout[-800:])
+    # Д3 (metis-0878): сбой самого храповика (трассировка, таймаут) — в warn раннер не краснит, в fail краснит
+    fake = os.path.join(root, "plugins", "pantheon", "scripts", "lint_ratchet.py")
+    for body_, extra in (("raise RuntimeError('boom')\n", {}), ("import time\ntime.sleep(60)\n", {"RUN_TESTS_RATCHET_TIMEOUT": "1"})):
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("import os\n\n\ndef ratchet_mode(root):\n    return os.environ.get('LINT_RATCHET_MODE') or 'warn'\n\n\n"
+                     "if __name__ == '__main__':\n    " + body_.replace("\n", "\n    ").rstrip() + "\n")
+        r = runner(root, env={"LINT_RATCHET_RUFF": stub, "LINT_RATCHET_MODE": "warn", **extra})
+        check("run-tests: храповик упал в warn — код 0, строка про сбой/таймаут и «предупреждение»",
+              r.returncode == 0 and "предупреждение" in r.stdout and not r.last.startswith("run-tests: храповик красный"),
+              r.stdout[-800:] + r.stderr[-400:])
+        r = runner(root, env={"LINT_RATCHET_RUFF": stub, "LINT_RATCHET_MODE": "fail", **extra})
+        check("run-tests: храповик упал в fail — код 1, «храповик красный» последней строкой",
+              r.returncode == 1 and r.last.startswith("run-tests: храповик красный"), r.stdout[-800:] + r.stderr[-400:])
     alone = repo({"plugins/x/tests/test_a.py": "print('ok a')\nprint('1 из 1 прошли')\n"})
     r = runner(alone, env={"LINT_RATCHET_RUFF": stub})
     check("run-tests: репозиторий без храповика — без строки храповика", r.returncode == 0 and "храповик" not in r.stdout
@@ -466,7 +513,7 @@ def t_real_ruff():
 
 
 def main():
-    for t in (t_clean, t_sizes, t_sizes_lower, t_complexity, t_complexity_lower, t_move, t_cycles, t_edges, t_backrefs,
+    for t in (t_clean, t_sizes, t_sizes_lower, t_complexity, t_complexity_lower, t_move, t_rename, t_cycles, t_edges, t_backrefs,
               t_backref_counts, t_lint, t_mode, t_fatal, t_run_tests, t_real_baseline, t_real_ruff):
         t()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
