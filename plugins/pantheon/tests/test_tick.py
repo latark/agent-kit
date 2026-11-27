@@ -888,7 +888,8 @@ sys.path.insert(0, {os.path.dirname(LIB)!r})
 import pantheon as p
 cmds = ['claude -p --agent clio "проход"', 'claude -p --agent iris --model haiku --max-turns 5 "x"',
         'claude -p --agent iris "x"', 'claude -p --agent argus "x"', 'claude -p --agent clio --settings /tmp/a.json "x"',
-        'claude -p --agent prometheus --model opus "x"']
+        'claude -p --agent prometheus --model opus "x"', 'pantheon migrate-paths x', 'pantheon view',
+        '~/projects/agent-kit/plugins/pantheon/scripts/moved.py', '/tmp/branch/plugins/pantheon/bin/pantheon view']
 print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
 """
     got = json.loads(subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True).stdout)
@@ -904,6 +905,10 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
                                                     "--model", "sonnet", "x"])
     check("parse_command: роль без окна задачи и --settings в команде — не разрешены",
           got['claude -p --agent argus "x"'] is None and got['claude -p --agent clio --settings /tmp/a.json "x"'] is None)
+    check("[T11] metis-0902: migrate-paths и скрипт ветки или клона роли — задача прохода не идёт; pantheon view — идёт",
+          got['pantheon migrate-paths x'] is None and got['~/projects/agent-kit/plugins/pantheon/scripts/moved.py'] is None
+          and got['/tmp/branch/plugins/pantheon/bin/pantheon view'] is None and got['pantheon view'] is not None,
+          {k: v for k, v in got.items() if not k.startswith("claude")})
 
     # run-job: окна нет или это ссылка — задача не идёт (claude не вызван), одна тревога, код не 0; окно есть — идёт
     fake = os.path.join(tmp, "fakebin")

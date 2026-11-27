@@ -483,7 +483,11 @@ def g(cwd, *a):
                            "-c", "init.defaultBranch=main", *a], capture_output=True, text=True, check=True).stdout
 
 
-ORIGIN = os.path.join(_ROOT, "origin.git")
+# «GitHub» — локальный голый репозиторий: H.DEPLOY_URL ведёт github.com/{repo} в _ROOT/gh/{repo}.git, а remote
+# origin основной копии — адрес GitHub (fetch), push — в тот же голый (pushurl)
+os.makedirs(os.path.join(_ROOT, "gh", "t"))
+ORIGIN = os.path.join(_ROOT, "gh", "t", "repo.git")
+H.DEPLOY_URL = os.path.join(_ROOT, "gh", "{repo}.git")
 MAIN = os.path.join(HOME, "projects", "repo")
 WT = os.path.join(HOME, "projects", "repo-wt")
 subprocess.run(["git", "init", "-q", "--bare", "-b", "main", ORIGIN], check=True)
@@ -494,7 +498,8 @@ with open(os.path.join(MAIN, ".gitignore"), "w") as fh:
     fh.write(".deployed-marker\n")
 g(MAIN, "add", "-A")
 g(MAIN, "commit", "-qm", "init")
-g(MAIN, "remote", "add", "origin", ORIGIN)
+g(MAIN, "remote", "add", "origin", "https://github.com/t/repo.git")
+g(MAIN, "remote", "set-url", "--push", "origin", ORIGIN)
 g(MAIN, "push", "-q", "origin", "main")
 g(MAIN, "worktree", "add", "-q", "-b", "feat", WT, "origin/main")
 
@@ -682,26 +687,44 @@ r = refused(H.facts_deploy, "~/projects/repo")
 check("config.worktree — ссылка → отказ", r and r[0] == "bad", r)
 os.unlink(os.path.join(MAIN, ".git", "config.worktree"))
 
-# --- deploy.sh: байты из коммита, bash -s, дерево до и после ------------------------------------------------------
-marker = os.path.join(MAIN, ".deployed-marker")
+# --- deploy.sh: коммит из main по живому ответу GitHub, своя копия STATE (metis-0775, 0870, 0902) -----------------
+COPY = os.path.join(STATE, "handoff", "deploy", "t__repo")
+marker = os.path.join(COPY, ".deployed-marker")
+ROLE_MARK = os.path.join(MAIN, ".deployed-marker")
+OTHER = os.path.join(_ROOT, "other")   # чужой push в «GitHub» мимо основной копии
+subprocess.run(["git", "clone", "-q", ORIGIN, OTHER], check=True, capture_output=True)
+
+
+def head_main():
+    return g(MAIN, "rev-parse", "HEAD").strip()
+
+
+def commit_push(path, text, msg):
+    with open(os.path.join(MAIN, path), "w") as fh:
+        fh.write(text)
+    g(MAIN, "add", path)
+    g(MAIN, "commit", "-qm", msg)
+    g(MAIN, "push", "-q", "origin", "main")
+
+
 reset()
 rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-0775")
-check("заявка deploy: текст с хешем deploy.sh из коммита и HEAD", rc == 0 and "deploy.sh " in out and "из коммита" in out
-      and "HEAD " in out, out)
+check("[T3] заявка deploy вершины main: окно «на коммите <sha> из main t/repo» и хеш deploy.sh", rc == 0 and rid and
+      f"на коммите {head_main()[:12]} из main t/repo" in out and "deploy.sh " in out, out)
 run()
-check("[0775] палец → deploy.sh исполнен один раз, журнал в STATE/handoff/runs", os.path.exists(marker) and
-      result(qdir(), rid)["state"] == "done" and os.path.exists(os.path.join(STATE, "handoff", "runs", f"{rid}.log"))
-      and "изменилось" not in result(qdir(), rid)["note"], result(qdir(), rid))
-os.unlink(marker)
+check("[T3][0775] палец → deploy.sh исполнен в своей копии STATE, а не в папке роли; журнал в STATE/handoff/runs",
+      os.path.exists(marker) and not os.path.exists(ROLE_MARK) and result(qdir(), rid)["state"] == "done"
+      and os.path.exists(os.path.join(STATE, "handoff", "runs", f"{rid}.log"))
+      and "изменилась" not in result(qdir(), rid)["note"], result(qdir(), rid))
+check("своя копия — свой git: объекты не роли (нет alternates), config без ключей роли",
+      not os.path.exists(os.path.join(COPY, ".git", "objects", "info", "alternates")) and
+      "github.com" not in open(os.path.join(COPY, ".git", "config"), encoding="utf-8").read())
 reset()
 rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0775")
-with open(os.path.join(MAIN, "deploy.sh"), "a") as fh:
-    fh.write("echo extra\n")
-g(MAIN, "commit", "-qam", "deploy changed")
-g(MAIN, "push", "-q", "origin", "main")
+commit_push("deploy.sh", 'echo deployed > "$PWD/.deployed-marker"\necho extra\n', "deploy changed")
 run()
-check("deploy.sh сменился после заявки → снято без окна и без запуска", not ASKED and not os.path.exists(marker)
-      and result(qdir(), rid)["state"] == "dropped", result(qdir(), rid))
+check("deploy.sh сменился после заявки → снято без окна и без запуска", not ASKED and result(qdir(), rid)["state"] ==
+      "dropped", result(qdir(), rid))
 
 r = refused(H.facts_deploy, "~/projects/repo-wt")
 check("deploy из worktree → отказ", r and r[0] == "bad" and "worktree" in r[1], r)
@@ -710,112 +733,175 @@ EVILM = os.path.join(_ROOT, "evil-ran")
 with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
     fh.write(f'touch "{EVILM}"\n')
 facts = H.facts_deploy("~/projects/repo")
-check("факты deploy: байты из коммита HEAD, а не файл с диска", facts["script"] == COMMITTED["script"] and
+check("факты deploy: байты из коммита, а не файл с диска", facts["script"] == COMMITTED["script"] and
       b"evil-ran" not in facts["bytes"], facts["desc"])
-r = refused(H.exec_deploy, {"id": "20261105-000000-eeeeee"}, facts)
-check("deploy: правка в дереве после пальца → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker)
-      and not os.path.exists(EVILM), r)
-real_dirty = H.dirty
-H.dirty = lambda g_, work: None   # гонка: дерево сменилось между проверкой и запуском
-try:
-    H.exec_deploy({"id": "20261105-000000-aaaaaa"}, facts)
-finally:
-    H.dirty = real_dirty
-check("deploy.sh подменён на диске → исполнены байты из коммита (bash -s), а не файл",
-      os.path.exists(marker) and not os.path.exists(EVILM), (os.path.exists(marker), os.path.exists(EVILM)))
+shutil.rmtree(COPY)   # копия создаётся заново, если её нет
+facts = H.facts_deploy("~/projects/repo")
+note = H.exec_deploy({"id": "20261105-000000-aaaaaa"}, facts)
+check("deploy.sh подменён в дереве роли → исполнены байты коммита в своей копии, дерево роли не мешает",
+      os.path.exists(marker) and not os.path.exists(EVILM) and f"коммите {facts['head'][:12]}" in note, note)
 g(MAIN, "checkout", "-q", "--", "deploy.sh")
-os.unlink(marker)
 r = refused(H.exec_deploy, {"id": "20261105-000000-bbbbbb"}, dict(facts, bytes=b"touch x\n"))
 check("deploy: байты не того хеша → отказ без запуска", r and "не те" in r[1], r)
-with open(os.path.join(MAIN, "untracked.txt"), "w") as fh:
-    fh.write("x")
-r = refused(H.exec_deploy, {"id": "20261105-000000-ffffff"}, facts)
-check("deploy: неотслеживаемый файл → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker), r)
-os.unlink(os.path.join(MAIN, "untracked.txt"))
-with open(os.path.join(MAIN, "dirty.txt"), "w") as fh:
-    fh.write("x")
-g(MAIN, "add", "dirty.txt")
+
+# [T1] коммит ветки, которого нет в main источника; [T2] роль переставила refs/remotes/origin/main
+MAIN_TIP = head_main()
+g(MAIN, "checkout", "-q", "-b", "side")
+with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
+    fh.write(f'touch "{EVILM}"\n')
+g(MAIN, "commit", "-qam", "side deploy")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("[T1] HEAD — коммит ветки, его нет в main источника → отказ «только шлюз», «не в main»",
+      r and r[0] == "merge" and "не в main t/repo" in r[1], r)
+g(MAIN, "push", "-q", "origin", "side")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("[T1] коммит есть в другой ветке источника (side), но не в main → всё равно отказ", r and r[0] == "merge", r)
 reset()
-rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0775")
+rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-0902")
+check("[T1] заявка с коммитом не из main → отказ сразу, без заявки и окна", rc != 0 and not rid and not ASKED and
+      "не в main" in out, out)
+g(MAIN, "update-ref", "refs/remotes/origin/main", "HEAD")
+g(MAIN, "update-ref", "refs/remotes/origin/HEAD", "HEAD")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("[T2] роль переставила refs/remotes/origin/main и origin/HEAD на свой коммит → отказ: ссылкам клона не верим",
+      r and r[0] == "merge" and "не в main" in r[1], r)
+g(MAIN, "update-ref", "-d", "refs/remotes/origin/HEAD")
+g(MAIN, "update-ref", "refs/remotes/origin/main", MAIN_TIP)
+g(MAIN, "checkout", "-q", "main")
+g(MAIN, "update-ref", "-d", "refs/remotes/origin/main")
+check("[T3] ссылки origin в клоне роли нет вовсе → факты по живому ответу (вершина main)",
+      refused(H.facts_deploy, "~/projects/repo") is None)
+g(MAIN, "update-ref", "refs/remotes/origin/main", MAIN_TIP)
+ROOT_SHA = g(MAIN, "rev-list", "--max-parents=0", "HEAD").strip()
+g(MAIN, "checkout", "-q", "--detach", ROOT_SHA)
+os.unlink(marker) if os.path.exists(marker) else None
+f = H.facts_deploy("~/projects/repo")
+note = H.exec_deploy({"id": "20261105-000000-333333"}, f)
+check("[T3] HEAD — старый коммит main (откат) → факты и выкладка старого deploy.sh",
+      f["head"] == ROOT_SHA and os.path.exists(marker) and ROOT_SHA[:12] in note, (f["desc"], note))
+g(MAIN, "checkout", "-q", "main")
+check("[T1][T2] за весь раздел deploy.sh не из main не исполнен", not os.path.exists(EVILM))
+
+# [T4] GitHub не ответил → отказ до окна, не выкладка
+REAL_URL = H.DEPLOY_URL
+H.DEPLOY_URL = os.path.join(_ROOT, "gh-down", "{repo}.git")
+r = refused(H.facts_deploy, "~/projects/repo")
+check("[T4] fetch упал → отказ «GitHub не ответил», а не выкладка", r and r[0] == "bad" and "GitHub не ответил" in r[1], r)
+H.DEPLOY_URL = REAL_URL
+reset()
+rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0902")
+H.DEPLOY_URL = os.path.join(_ROOT, "gh-down", "{repo}.git")
+os.unlink(marker) if os.path.exists(marker) else None
 run()
-check("deploy с незакоммиченными правками → после пальца отказ, deploy.sh не исполнен", not os.path.exists(marker)
-      and result(qdir(), rid)["state"] == "failed", result(qdir(), rid))
-g(MAIN, "reset", "-q", "--hard")
-with open(os.path.join(MAIN, ".gitmodules"), "w") as fh:
-    fh.write('[submodule "s"]\n\tpath = s\n\turl = x\n')
-g(MAIN, "add", ".gitmodules")
-g(MAIN, "commit", "-qm", "modules")
-g(MAIN, "push", "-q", "origin", "main")
-r =refused(H.exec_deploy, {"id": "20261105-000000-111111"}, H.facts_deploy("~/projects/repo"))
-check("deploy: в репозитории .gitmodules → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker), r)
+H.DEPLOY_URL = REAL_URL
+check("[T4] GitHub пропал между заявкой и проходом → окна нет, deploy.sh не исполнен",
+      rid and not ASKED and not os.path.exists(marker) and result(qdir(), rid)["state"] != "done",
+      (ASKED, rid and result(qdir(), rid)))
+
+# [T6] между пальцем и запуском main ушёл вперёд — выкладка идёт; переписан force-push'ем — отказ
+g(OTHER, "pull", "-q", "--ff-only")
+
+
+def main_ahead():
+    with open(os.path.join(OTHER, "later.txt"), "w") as fh:
+        fh.write("later")
+    g(OTHER, "add", "later.txt")
+    g(OTHER, "commit", "-qm", "later")
+    g(OTHER, "push", "-q", "origin", "HEAD:main")
+
+
+def force_pushed():
+    g(OTHER, "reset", "-q", "--hard", ROOT_SHA)
+    with open(os.path.join(OTHER, "rewrite.txt"), "w") as fh:
+        fh.write("rewrite")
+    g(OTHER, "add", "rewrite.txt")
+    g(OTHER, "commit", "-qm", "rewrite")
+    g(OTHER, "push", "-q", "-f", "origin", "HEAD:main")
+
+
+reset(during=main_ahead)
+rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0902")
+run()
+check("[T6] main ушёл вперёд после заявки → коммит всё ещё предок, выкладка идёт", ASKED and os.path.exists(marker) and
+      result(qdir(), rid)["state"] == "done", result(qdir(), rid))
+os.unlink(marker)
+g(MAIN, "pull", "-q", "--ff-only", ORIGIN, "main")
+g(OTHER, "pull", "-q", "--ff-only")
+reset(during=force_pushed)
+rc, rid, _ = touch("deploy", "~/projects/repo", "--task", "metis-0902")
+run()
+check("[T6] main переписан force-push'ем после пальца (коммит не предок) → отказ, deploy.sh не исполнен",
+      ASKED and not os.path.exists(marker) and result(qdir(), rid)["state"] != "done", result(qdir(), rid))
+g(MAIN, "push", "-q", "-f", "origin", "main")
+
+# [T5] node_modules/.bin и файл со skip-worktree в основной копии на выкладку не влияют; ключи — из STATE/outside/env
+NM_EVIL, SKIP_EVIL = os.path.join(_ROOT, "nm-ran"), os.path.join(_ROOT, "skip-ran")
+with open(os.path.join(MAIN, ".gitignore"), "w") as fh:
+    fh.write(".deployed-marker\nnode_modules/\ntool.out\nkey.out\n")
+with open(os.path.join(MAIN, "tool.sh"), "w") as fh:
+    fh.write('echo committed > "$PWD/tool.out"\n')
+g(MAIN, "add", ".gitignore", "tool.sh")
+g(MAIN, "commit", "-qm", "tool")
+commit_push("deploy.sh", 'echo deployed > "$PWD/.deployed-marker"\nsh ./tool.sh\n'
+            'if [ -x node_modules/.bin/x ]; then node_modules/.bin/x; fi\nprintf %s "${DEPLOY_KEY-}" > key.out\n',
+            "deploy runs tool")
+os.makedirs(os.path.join(MAIN, "node_modules", ".bin"))
+with open(os.path.join(MAIN, "node_modules", ".bin", "x"), "w") as fh:
+    fh.write(f'#!/bin/sh\ntouch "{NM_EVIL}"\n')
+os.chmod(os.path.join(MAIN, "node_modules", ".bin", "x"), 0o755)
+g(MAIN, "update-index", "--skip-worktree", "tool.sh")
+with open(os.path.join(MAIN, "tool.sh"), "w") as fh:
+    fh.write(f'touch "{SKIP_EVIL}"\n')
+with open(os.path.join(MAIN, ".env.local"), "w") as fh:
+    fh.write("DEPLOY_KEY=from-role\n")
+os.makedirs(os.path.join(STATE, "outside", "env"), mode=0o700, exist_ok=True)
+with open(os.path.join(STATE, "outside", "env", "t__repo.env"), "w") as fh:
+    fh.write("DEPLOY_KEY=from-owner\n")
+os.chmod(os.path.join(STATE, "outside", "env", "t__repo.env"), 0o600)
+f = H.facts_deploy("~/projects/repo")
+note = H.exec_deploy({"id": "20261105-000000-444444"}, f)
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+check("[T5] node_modules/.bin и tool.sh со skip-worktree в основной копии → исполнены байты коммита в своей копии",
+      read(os.path.join(COPY, "tool.out")) == "committed\n" and not os.path.exists(NM_EVIL) and
+      not os.path.exists(SKIP_EVIL), (note, read(os.path.join(COPY, "tool.out"))))
+check("[T5] ключи deploy.sh — из STATE/outside/env (dev-ключи outside), не .env.local роли",
+      read(os.path.join(COPY, "key.out")) == "from-owner", read(os.path.join(COPY, "key.out")))
+g(MAIN, "update-index", "--no-skip-worktree", "tool.sh")
+g(MAIN, "checkout", "-q", "--", "tool.sh")
+shutil.rmtree(os.path.join(MAIN, "node_modules"))
+os.unlink(os.path.join(MAIN, ".env.local"))
+with open(os.path.join(COPY, "stray.txt"), "w") as fh:
+    fh.write("x")
+os.makedirs(os.path.join(COPY, "node_modules"), exist_ok=True)
+H.exec_deploy({"id": "20261105-000000-555555"}, H.facts_deploy("~/projects/repo"))
+check("своя копия перед выкладкой очищена (clean -ffdx): чужое и игнорируемое убрано",
+      not os.path.exists(os.path.join(COPY, "stray.txt")) and not os.path.exists(os.path.join(COPY, "node_modules")))
+
+commit_push(".gitmodules", '[submodule "s"]\n\tpath = s\n\turl = x\n', "modules")
+os.unlink(marker)
+r = refused(H.exec_deploy, {"id": "20261105-000000-111111"}, H.facts_deploy("~/projects/repo"))
+check("deploy: в коммите .gitmodules → отказ без запуска", r and r[0] == "yes" and not os.path.exists(marker), r)
 g(MAIN, "rm", "-q", ".gitmodules")
 g(MAIN, "commit", "-qm", "no modules")
-with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
-    fh.write('echo x > "$PWD/after.txt"\n')
-g(MAIN, "commit", "-qam", "deploy leaves a file")
-g(MAIN, "push", "-q", "origin", "main")
-note =H.exec_deploy({"id": "20261105-000000-222222"}, H.facts_deploy("~/projects/repo"))
-check("deploy оставил файл в дереве → итог говорит об этом", "дерево изменилось" in note and "after.txt" in note, note)
-os.unlink(os.path.join(MAIN, "after.txt"))
-
-# --- deploy только слитого коммита: HEAD есть в ветке по умолчанию origin (metis-0870) ----------------------------
-AFTER = os.path.join(MAIN, "after.txt")
-f = H.facts_deploy("~/projects/repo")
-check("[0870] HEAD слит в origin/main (origin/HEAD нет → main) → факты, окно говорит «есть в origin/main»",
-      f["head"] == g(MAIN, "rev-parse", "HEAD").strip() and "есть в origin/main" in f["desc"], f["desc"])
-reset()
-rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-0870")
-check("[0870] заявка deploy слитого HEAD: текст окна с «есть в origin/main»", rc == 0 and rid and
-      "есть в origin/main" in out, out)
-with open(os.path.join(MAIN, "deploy.sh"), "w") as fh:
-    fh.write('echo ahead > "$PWD/after.txt"\n')
-g(MAIN, "commit", "-qam", "local deploy, not merged")
-run()
-check("[0870] после заявки роль закоммитила deploy.sh без слияния → снято без окна и без запуска",
-      not ASKED and not os.path.exists(AFTER) and result(qdir(), rid)["state"] == "refused"
-      and "не слит в origin/main" in result(qdir(), rid)["note"], (ASKED, result(qdir(), rid)))
-r = refused(H.facts_deploy, "~/projects/repo")
-check("[0870] HEAD впереди origin/main → отказ «только шлюз», причина «не слит в origin/main»",
-      r and r[0] == "merge" and "не слит в origin/main" in r[1], r)
-reset()
-rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-0870")
-check("[0870] заявка deploy с неслитым HEAD → отказ сразу, без заявки и окна", rc != 0 and not rid and not ASKED and
-      "не слит" in out, out)
-g(MAIN, "pack-refs", "--all")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("[0870] ссылки в packed-refs → та же проверка, отказ", r and r[0] == "merge" and "не слит" in r[1], r)
-g(MAIN, "push", "-q", "origin", "main")
-check("[0870] после push HEAD слит → факты", refused(H.facts_deploy, "~/projects/repo") is None)
-ORIGIN_MAIN = g(MAIN, "rev-parse", "refs/remotes/origin/main").strip()
-g(MAIN, "update-ref", "-d", "refs/remotes/origin/main")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("[0870] ссылки origin нет → отказ «нет ссылки origin»", r and r[0] == "merge" and "нет ссылки origin" in r[1], r)
-g(MAIN, "update-ref", "refs/remotes/origin/master", ORIGIN_MAIN)
-f = H.facts_deploy("~/projects/repo")
-check("[0870] нет origin/main, есть origin/master → ветка master", "есть в origin/master" in f["desc"], f["desc"])
-g(MAIN, "update-ref", "-d", "refs/remotes/origin/master")
-g(MAIN, "update-ref", "refs/remotes/origin/main", ORIGIN_MAIN)
-g(MAIN, "push", "-q", "origin", "HEAD~1:refs/heads/release")
-g(MAIN, "fetch", "-q", "origin")
-g(MAIN, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("[0870] origin/HEAD → release: ветка по умолчанию из origin/HEAD, а не main; HEAD не в ней → отказ",
-      r and r[0] == "merge" and "не слит в origin/release" in r[1], r)
-g(MAIN, "push", "-q", "origin", "HEAD:refs/heads/release")
-f = H.facts_deploy("~/projects/repo")
-check("[0870] HEAD есть в origin/release (цель origin/HEAD) → факты", "есть в origin/release" in f["desc"], f["desc"])
-# цель той же длины, что refs/remotes/origin/, с хвостом main: без сверки начала ветка вышла бы «main»
-g(MAIN, "update-ref", "refs/heads/release1/main", "HEAD")
-g(MAIN, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/release1/main")
-r = refused(H.facts_deploy, "~/projects/repo")
-check("[0870] origin/HEAD ведёт не в refs/remotes/origin → отказ, а не main", r and r[0] == "merge" and
-      "нет ссылки origin" in r[1], r)
-g(MAIN, "update-ref", "-d", "refs/heads/release1/main")
-g(MAIN, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
-f = H.facts_deploy("~/projects/repo")
-check("[0870] origin/HEAD висит (ветки gone нет) → ветка main", "есть в origin/main" in f["desc"], f["desc"])
-g(MAIN, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-check("[0870] за весь раздел неслитый deploy.sh не исполнен", not os.path.exists(AFTER))
+commit_push("deploy.sh", 'echo x > "$PWD/after.txt"\n', "deploy leaves a file")
+note = H.exec_deploy({"id": "20261105-000000-222222"}, H.facts_deploy("~/projects/repo"))
+check("deploy оставил файл в своей копии → итог говорит об этом", "своя копия изменилась" in note and "after.txt" in note,
+      note)
+for url, want in [("https://github.com/t/repo.git", "t/repo"), ("git@github.com:t/repo.git", "t/repo"),
+                  ("ssh://git@github.com/o-1/r.x", "o-1/r.x"), ("https://github.com/t/repo/", "t/repo")]:
+    check(f"github_repo({url}) → {want}", H.github_repo(url) == want, H.github_repo(url))
+for url in ["https://gitlab.com/t/repo.git", ORIGIN, "https://github.com/t/../x", "https://github.com/t/..", "",
+            None, "https://github.com.evil/t/repo"]:
+    check(f"github_repo({url}) → отказ", refused(H.github_repo, url) is not None)
 
 os.symlink("deploy.sh", os.path.join(MAIN, "deploy-link.sh"))
 g(MAIN, "rm", "-q", "deploy.sh")
