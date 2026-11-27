@@ -17,6 +17,14 @@ requirements*.txt, либо файл) → какие MCP-серверы и пл�
   project-tools apply [--dir D] [--update ИМЯ]… [--accept ИМЯ]…
                                                    записать .mcp.json, одобрения, плагины, блок Codex
   project-tools skip ИМЯ… [--dir D]                ваше «не надо»: отказ от сервера или плагина, подсказка замолкает
+  project-tools install [ПЛАГИН…] [--dir D]       поставить одобренные плагины карты в проект (metis-1409):
+                                                   одобрен — включён в .claude/settings*.json проекта (apply), маркетплейс
+                                                   карты записан там с тем же источником. `claude plugin marketplace add
+                                                   <репозиторий карты> --scope project`, `claude plugin install --scope
+                                                   project`, итог — по `claude plugin list --json` (код 1 — не встал).
+                                                   Неодобренный, названный явно, — отказ, код 2. В окне роли
+                                                   (PANTHEON_ROLE) — заявка <кэш окна>/project-tools/install-*.req,
+                                                   ставит плановый проход вне окна той же командой
   project-tools hint                               хук SessionStart: строка в контекст, если чего-то нет или
                                                    одобренный сервер изменился
   project-tools outdated                           закреплённые версии против свежих в npm
@@ -580,8 +588,8 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
             if have_plugins is None:
                 have_plugins = installed_plugins()
             if plugin not in have_plugins:
-                add = f"`claude plugin marketplace add {mkt['source']['repo']}`, затем " if mkt else ""
-                p.notes.append(f"{name}: плагин {plugin} не установлен — {add}`claude plugin install {plugin}`")
+                p.notes.append(f"{name}: плагин {plugin} не установлен — поставит `project-tools install {plugin}` "
+                               "после apply (в окне роли — заявкой, ставит плановый проход)")
 
     # .mcp.json
     if new_servers != servers:
@@ -868,6 +876,154 @@ def cmd_skip(args):
     return 0
 
 
+CLAUDE_TIMEOUT = 300  # marketplace add клонирует репозиторий с GitHub
+
+
+def approved_plugins(root):
+    """Плагины из карты для стека проекта (metis-1409): одобренные — {плагин: маркетплейс карты или None}, остальные —
+    {плагин: почему нет}. Одобрен — включён (true) в .claude/settings*.json проекта, а маркетплейс карты записан в
+    settings.json с тем же источником, что в карте. Источник маркетплейса для установки — всегда из карты."""
+    cmap = load_map()
+    _, wanted = detect(cmap, root)
+    shared = read_json(os.path.join(root, ".claude", "settings.json"))
+    local = read_json(os.path.join(root, ".claude", "settings.local.json"))
+    markets = _as_dict(shared.get("extraKnownMarketplaces"))
+    ok, refused = {}, {}
+    for name in sorted(wanted):
+        tool = cmap["tools"][name]
+        plugin, mkt = tool.get("plugin"), tool.get("marketplace")
+        if not plugin:
+            continue
+        if plugin_value(plugin, local, shared) is not True:
+            refused[plugin] = "не одобрен: не включён в .claude/settings*.json проекта — сначала `project-tools apply`"
+        elif mkt and mkt["source"].get("source") != "github":
+            refused[plugin] = f"маркетплейс {mkt['name']}: ставлю только источник github"
+        elif mkt and _as_dict(_as_dict(markets.get(mkt["name"])).get("source")) != mkt["source"]:
+            refused[plugin] = f"не одобрен: маркетплейс {mkt['name']} в .claude/settings.json не как в карте"
+        else:
+            ok[plugin] = mkt
+    return ok, refused
+
+
+def claude_run(args, root):
+    exe = shutil.which("claude")
+    if not exe:
+        raise Broken("claude не найден в PATH")
+    try:
+        return subprocess.run([exe, *args], cwd=root, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
+                              stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", f"не уложился в {CLAUDE_TIMEOUT} с")
+    except OSError as e:
+        return subprocess.CompletedProcess(args, 126, "", str(e))
+
+
+def project_plugins(root):
+    """Плагины, которые Claude Code в этом проекте видит установленными: `claude plugin list --json` — уровень
+    пользователя или проекта с этой папкой."""
+    r = claude_run(["plugin", "list", "--json"], root)
+    try:
+        data = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, list):
+        raise Broken(f"`claude plugin list --json` не разобрать (код {r.returncode}): {clip(tail(r))}")
+    have = set()
+    for e in data:
+        if not isinstance(e, dict):
+            continue
+        where = e.get("projectPath")
+        if e.get("scope") == "user" or (isinstance(where, str) and os.path.realpath(where) == root):
+            have.add(e.get("id"))
+    return have
+
+
+def tail(r):
+    lines = ((r.stderr or "") + "\n" + (r.stdout or "")).strip().splitlines()
+    return lines[-1] if lines else "без вывода"
+
+
+def window_cache():
+    """Кэш окна роли Пантеона (как pantheon browser.window_cache): PANTHEON_TMP=<кэш>/tmp или XDG_CACHE_HOME=<кэш>/xdg."""
+    tmp = os.environ.get("PANTHEON_TMP")
+    if tmp:
+        return os.path.dirname(os.path.realpath(tmp))
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    caches = os.path.realpath(os.path.join(HOME, "Library", "Caches", "pantheon-sandbox"))
+    if xdg and os.path.basename(os.path.realpath(xdg)) == "xdg" \
+            and os.path.dirname(os.path.dirname(os.path.realpath(xdg))) == caches:
+        return os.path.dirname(os.path.realpath(xdg))
+    return None
+
+
+def install_request(root, plugins):
+    """В окне роли claude plugin install не идёт (песочница, ~/.claude/plugins): заявка в кэш окна, ставит плановый
+    проход вне окна той же командой (pantheon, mcp_report.take_install_requests)."""
+    cache = window_cache()
+    if not cache:
+        raise Broken("окно роли без кэша окна (PANTHEON_TMP) — заявку на установку некуда положить")
+    qdir = os.path.join(cache, "project-tools")
+    name = f"install-{hashlib.sha256(root.encode()).hexdigest()[:16]}.req"
+    try:
+        os.makedirs(qdir, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(qdir, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"dir": root, "plugins": plugins, "time": time.time()}, fh)
+    except OSError as e:
+        raise Broken(f"заявка на установку не записана ({e.strerror or e})")
+    print(f"Заявка принята: {', '.join(plugins)} поставит плановый проход вне окна ({short(os.path.join(qdir, name))}).")
+    return 0
+
+
+def cmd_install(args):
+    """Ставит одобренные плагины карты в проект (metis-1409): marketplace add и install --scope project, итог —
+    по `claude plugin list --json`. Неодобренный, названный явно, — отказ с кодом 2; в окне роли — заявка."""
+    root, _ = project_root(args.dir)
+    guard_root(root)
+    check_no_links(root)
+    ok, refused = approved_plugins(root)
+    want = ok
+    if args.names:
+        bad = [n for n in args.names if n not in ok]
+        if bad:
+            raise Broken("не ставлю: " + "; ".join(f"{n} — {refused.get(n, 'нет в карте для стеков этого проекта')}"
+                                                   for n in bad))
+        want = {n: ok[n] for n in args.names}
+    for n, why in refused.items():
+        if not args.names:
+            print(f"  · {n}: {why}")
+    if not want:
+        print("Ставить нечего.")
+        return 0
+    if os.environ.get("PANTHEON_ROLE"):
+        return install_request(root, sorted(want))
+    have = project_plugins(root)
+    todo = [n for n in sorted(want) if n not in have]
+    failed = {}
+    for plugin in todo:
+        mkt = want[plugin]
+        if mkt:  # уже добавленный маркетплейс даёт отказ — судит установка и сверка ниже
+            r = claude_run(["plugin", "marketplace", "add", mkt["source"]["repo"], "--scope", "project"], root)
+            if r.returncode:
+                print(f"  · {plugin}: marketplace add → код {r.returncode}: {clip(tail(r))}")
+        r = claude_run(["plugin", "install", plugin, "--scope", "project"], root)
+        if r.returncode:
+            failed[plugin] = f"claude plugin install → код {r.returncode}: {clip(tail(r))}"
+    have = project_plugins(root) if todo else have
+    for plugin in todo:
+        if plugin not in have and plugin not in failed:
+            failed[plugin] = "после установки нет в `claude plugin list`"
+    print(f"Проект: {short(root)}")
+    for plugin in sorted(want):
+        mark = "!" if plugin in failed else ("+" if plugin in todo else "=")
+        print(f"  {mark} {plugin}" + (f": {failed[plugin]}" if plugin in failed else
+                                      (" установлен" if plugin in todo else " уже установлен")))
+    if failed:
+        print(f"project-tools: не установлено: {', '.join(sorted(failed))}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def hint_warning(reason):
     msg = f"project-tools: ⚠ настройки MCP проекта не проверить ({clip(reason, 160)}). Проверьте: project-tools check"
     print(json.dumps({"systemMessage": msg, "hookSpecificOutput": {
@@ -984,11 +1140,15 @@ def main(argv=None):
     s = sub.add_parser("skip")
     s.add_argument("names", nargs="+", metavar="ИМЯ")
     s.add_argument("--dir", default=os.getcwd())
+    s = sub.add_parser("install")
+    s.add_argument("names", nargs="*", metavar="ПЛАГИН")
+    s.add_argument("--dir", default=os.getcwd())
     for name in ("hint", "outdated", "map"):
         sub.add_parser(name)
     args = ap.parse_args(argv)
     try:
         return {"check": cmd_check, "apply": cmd_apply, "skip": cmd_skip, "hint": cmd_hint, "outdated": cmd_outdated,
+                "install": cmd_install,
                 "map": cmd_map}[args.cmd](args)
     except PartlyWritten as e:
         print(f"project-tools: {e}.", file=sys.stderr)

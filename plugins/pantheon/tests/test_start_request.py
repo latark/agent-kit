@@ -418,8 +418,13 @@ try:
             res = G["_hestia_by_request"]("metis-0001")
             FakeSub.rc = 2
             res2 = G["_hestia_by_request"]("metis-0001")
+            a0 = len(alerts_text())
+            G["_hestia_by_request"]("metis-0001", "заявка окна metis-pantheon")
+            wa = alerts_text()[a0:]
         finally:
             G["subprocess"] = real_sub
+        check("1409 _hestia_by_request по заявке окна: тревога «заявка окна <имя>: Гестия …», не «заявка Зевса»",
+              "заявка окна metis-pantheon: Гестия по задаче metis-0001" in wa and "заявка Зевса" not in wa, wa)
         argv, env = FakeSub.seen[0] if FakeSub.seen else ([], {})
         check("1066 _hestia_by_request: pantheon wake hestia --task <id> --from zeus, без роли окна; итог строкой",
               argv[1:] == ["wake", "hestia", "--task", "metis-0001", "--from", "zeus"] and argv[0].endswith("/bin/pantheon")
@@ -428,6 +433,104 @@ try:
     os.environ["PANTHEON_ROLE"] = "domain-coordinator"
     rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001", "--from", "zeus"])
     check("1066 wake hestia --from zeus в окне не hq → код 2", rc == 2 and "--from zeus" in err, (rc, out, err))
+
+    # metis-1409: окно направления (metis-pantheon) не пишет STATE/hq-rw/locks — заявка в кэш окна, а не отказ замка
+    if os.geteuid() != 0:
+        wcache = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "metis-pantheon")
+        os.makedirs(os.path.join(wcache, "tmp"), exist_ok=True)
+        wreq_h = os.path.join(wcache, "start-req", "hestia.req")
+        locks = P.path(P.HQ_RW, "locks")
+        os.makedirs(locks, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(locks, "start-hestia.lock"))
+        os.environ["PANTHEON_TMP"] = os.path.join(wcache, "tmp")
+        os.chmod(locks, 0o555)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(P.path("owner-log", "zeus.md"))
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            check("1409 wake hestia из окна направления без вашего слова → код 2, заявки нет",
+                  rc == 2 and not os.path.exists(wreq_h), (rc, out, err))
+            word(3 * 3600)  # слово старое, но журнал окну закрыт (denyRead песочницы) — проверку делает проход
+            os.chmod(P.path("owner-log", "zeus.md"), 0o000)
+            try:
+                rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            finally:
+                os.chmod(P.path("owner-log", "zeus.md"), 0o644)
+            data = [json.loads(x) for x in open(wreq_h).read().splitlines()] if os.path.exists(wreq_h) else []
+            check("1409 (Б) owner-log/zeus.md окну не читается → заявка ложится без проверки слова, код 0",
+                  rc == 0 and "заявка принята" in out and len(data) == 1 and data[0]["by"] == "metis-pantheon",
+                  (rc, out, err, data))
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(wreq_h)
+            word(60)
+            rc, out, err = run(P.wake_hestia, ["hestia", "--task", "metis-0001"])
+            data = [json.loads(x) for x in open(wreq_h).read().splitlines()] if os.path.exists(wreq_h) else []
+            check("1409 wake hestia из окна направления, замок закрыт → код 0, заявка в кэше окна, by — имя окна",
+                  rc == 0 and "заявка принята" in out and "PermissionError" not in err and len(data) == 1
+                  and data[0] == {"target": "hestia", "time": data[0]["time"], "by": "metis-pantheon",
+                                  "task": "metis-0001"}, (rc, out, err, data))
+        finally:
+            os.chmod(locks, 0o755)
+            os.environ.pop("PANTHEON_TMP")
+        calls = []
+        G = P.take_start_requests.__globals__
+        real = G["_hestia_by_request"]
+        whos = []
+        G["_hestia_by_request"] = lambda tid, who="заявка Зевса": calls.append(tid) or whos.append(who) or "поднята"
+        try:
+            got = dict(P.take_start_requests(doms, P.now()))
+            check("1409 проход: заявка Гестии из кэша окна → один вызов, файл снят, тревога «заявка окна <имя>»",
+                  calls == ["metis-0001"] and got.get("hestia") == "поднята" and not os.path.exists(wreq_h)
+                  and whos == ["заявка окна metis-pantheon"], (calls, got, whos))
+            for by, ago, why in (("zeus", 60, "by не имя окна"), ("metis-pantheon", 3 * 3600, "без вашего слова")):
+                word(ago)
+                with open(wreq_h, "w") as fh:
+                    fh.write(json.dumps({"target": "hestia", "time": P.stamp(P.now()), "by": by,
+                                         "task": "metis-0001"}) + "\n")
+                del calls[:]
+                a0 = len(alerts_text())
+                got = dict(P.take_start_requests(doms, P.now()))
+                check(f"1409 проход: заявка Гестии из кэша окна, {why} → отклонена с тревогой, файл снят",
+                      not calls and "отклонена" in alerts_text()[a0:] and not os.path.exists(wreq_h), (calls, got))
+        finally:
+            G["_hestia_by_request"] = real
+
+    # metis-1409: заявка окна на плагины проекта → project-tools install --dir вне окна (без роли), файл снят
+    M = P.mcp_report_mod()
+    pdir = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox", "metis-pantheon", "project-tools")
+    os.makedirs(pdir, exist_ok=True)
+    proj = os.path.realpath(os.path.join(_ROOT, "proj-ext"))
+    os.makedirs(proj, exist_ok=True)
+    fake = os.path.join(_ROOT, "fake-project-tools")
+    with open(fake, "w") as fh:
+        fh.write('#!/bin/sh\necho "$PANTHEON_ROLE|$*" >> "' + fake + '.log"\necho "  + плагин установлен"\n')
+    os.chmod(fake, 0o755)
+    real_ptc = P.project_tools_cmd
+    P.project_tools_cmd = lambda: fake
+    try:
+        with open(os.path.join(pdir, "install-aaaa.req"), "w") as fh:
+            json.dump({"dir": proj, "plugins": ["x@y"], "time": 1}, fh)
+        with open(os.path.join(pdir, "install-bbbb.req"), "w") as fh:
+            json.dump({"dir": "relative/path"}, fh)
+        a0 = len(alerts_text())
+        got = M.take_install_requests(P.now())
+        ran = open(fake + ".log").read().splitlines() if os.path.exists(fake + ".log") else []
+        check("1409 проход: заявка окна на плагины → project-tools install --dir <папка> без роли, код 0; файлы сняты",
+              got == [(proj, 0), (None, "dir — не существующая папка с полным путём")]
+              and ran == [f"|install --dir {proj}"] and os.listdir(pdir) == []
+              and "отклонена" in alerts_text()[a0:], (got, ran, os.listdir(pdir)))
+        outer = os.path.join(_ROOT, "install-outer.json")  # жёсткая ссылка на файл вне кэша окна — не заявка окна
+        with open(outer, "w") as fh:
+            json.dump({"dir": proj}, fh)
+        os.link(outer, os.path.join(pdir, "install-cccc.req"))
+        got = M.take_install_requests(P.now())
+        ran2 = open(fake + ".log").read().splitlines() if os.path.exists(fake + ".log") else []
+        check("1409 проход: заявка на плагины — жёсткая ссылка (ссылок 2) → отклонена, project-tools не зван",
+              len(got) == 1 and got[0][0] is None and "ссылок 2" in got[0][1] and ran2 == ran
+              and os.listdir(pdir) == [], (got, ran2))
+    finally:
+        P.project_tools_cmd = real_ptc
     os.environ.pop("PANTHEON_ROLE")
     with contextlib.suppress(FileNotFoundError):
         os.unlink(P.path("owner-log", "zeus.md"))

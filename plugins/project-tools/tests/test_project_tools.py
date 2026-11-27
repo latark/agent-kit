@@ -6,6 +6,7 @@
 Обёртка bin/project-tools: при /usr/bin/python3 (3.9) первым в PATH берёт 3.11+; без 3.11+ подсказка молчит (код 0),
 команда — код 2 с причиной (metis-0571).
 """
+import contextlib
 import glob as _glob
 import json
 import os
@@ -170,7 +171,7 @@ check("плагин chrome-devtools-mcp выключен, Supabase включё�
       shared["enabledPlugins"] == {"chrome-devtools-mcp@claude-plugins-official": False,
                                    "context7@claude-plugins-official": True,
                                    "supabase@claude-plugins-official": True} and shared["model"] == "opus")
-check("заметка: плагин Supabase не установлен", "claude plugin install supabase@claude-plugins-official" in r.stdout)
+check("заметка: плагин Supabase не установлен", "project-tools install supabase@claude-plugins-official" in r.stdout)
 
 # 6. Отказы владельца уважаются
 rej = project(home, "rej", {"package.json": pkg(next="16.0.0"),
@@ -592,6 +593,67 @@ try:
           and r.stdout.rstrip().endswith("project_tools.py check"))
 finally:
     shutil.rmtree(_w, ignore_errors=True)
+
+# metis-1409: install ставит одобренный плагин карты (marketplace add + install --scope project, сверка по list),
+# неодобренному — отказ без вызова claude; в окне роли — заявка в кэш окна. claude — подделка, настоящий не зовётся.
+fbin = os.path.join(home, "fakebin")
+os.makedirs(fbin)
+with open(os.path.join(fbin, "claude"), "w") as fh:
+    fh.write('#!/bin/sh\necho "$PWD|$*" >> "$FAKE_LOG"\n'
+             'case "$1 $2" in\n'
+             '"plugin list") if [ -f "$PWD/.fake-installed" ]; then printf \'[{"id":"%s","scope":"project",'
+             '"projectPath":"%s","enabled":true}]\' "$(cat "$PWD/.fake-installed")" "$PWD"; else echo "[]"; fi ;;\n'
+             '"plugin install") if [ -n "$FAKE_FAIL" ]; then echo "boom" >&2; exit 1; fi; '
+             'echo "$3" > "$PWD/.fake-installed" ;;\n'
+             'esac\nexit 0\n')
+os.chmod(os.path.join(fbin, "claude"), 0o755)
+flog = os.path.join(home, "fake-claude.log")
+
+
+def install(*args, extra=None):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(flog)
+    env = env_for(home) | {"PATH": fbin + ":" + env_for(home)["PATH"], "FAKE_LOG": flog} | (extra or {})
+    r = subprocess.run([sys.executable, "-I", CLI, "install", *args], env=env, cwd=home, capture_output=True,
+                       text=True, timeout=60)
+    calls = open(flog).read().splitlines() if os.path.exists(flog) else []
+    return r, calls
+
+
+MWG = "modern-web-guidance@googlechrome"
+r, calls = install("--dir", ext)
+check("1409 install: одобренный плагин → marketplace add (репозиторий карты) и install --scope project в папке "
+      "проекта, сверка по list, код 0",
+      r.returncode == 0 and calls == [f"{ext}|plugin list --json",
+                                      f"{ext}|plugin marketplace add GoogleChrome/modern-web-guidance --scope project",
+                                      f"{ext}|plugin install {MWG} --scope project", f"{ext}|plugin list --json"]
+      and f"+ {MWG}" in r.stdout, (r.returncode, calls, r.stdout, r.stderr))
+r, calls = install("--dir", ext)
+check("1409 install повтор: уже установлен — только list, код 0",
+      r.returncode == 0 and calls == [f"{ext}|plugin list --json"] and "уже установлен" in r.stdout, (calls, r.stdout))
+for d, why in ((foreign, "маркетплейс не как в карте"), (off, "выключен в проекте")):
+    r, calls = install(MWG, "--dir", d)
+    check(f"1409 install неодобренного ({why}): код 2, причина последней строкой, claude не зовётся",
+          r.returncode == 2 and "не одобрен" in r.stderr.strip().splitlines()[-1] and calls == [],
+          (r.returncode, calls, r.stderr))
+r, calls = install("--dir", off)
+check("1409 install без имён, неодобренный: «Ставить нечего», claude не зовётся",
+      r.returncode == 0 and "Ставить нечего" in r.stdout and calls == [], (r.stdout, calls))
+r, calls = install("other@market", "--dir", ext)
+check("1409 install плагина не из карты: код 2", r.returncode == 2 and calls == [], (r.stderr, calls))
+ext2 = project(home, "extfail", {"extension/manifest.json": {"manifest_version": 3}})
+run(home, "apply", "--dir", ext2)
+r, calls = install("--dir", ext2, extra={"FAKE_FAIL": "1"})
+check("1409 install: claude plugin install упал → код 1, «не установлено» последней строкой",
+      r.returncode == 1 and r.stderr.strip().splitlines()[-1].endswith(f"не установлено: {MWG}"), (r.stdout, r.stderr))
+wtmp = os.path.join(home, "Library", "Caches", "pantheon-sandbox", "metis-pantheon", "tmp")
+os.makedirs(wtmp)
+r, calls = install("--dir", ext2, extra={"PANTHEON_ROLE": "metis-pantheon", "PANTHEON_TMP": wtmp})
+reqs = _glob.glob(os.path.join(os.path.dirname(wtmp), "project-tools", "install-*.req"))
+req = json.load(open(reqs[0])) if len(reqs) == 1 else {}
+check("1409 install в окне роли: claude не зовётся, заявка в кэше окна с папкой проекта, код 0",
+      r.returncode == 0 and calls == [] and req.get("dir") == ext2 and req.get("plugins") == [MWG]
+      and "Заявка принята" in r.stdout, (r.stdout, r.stderr, calls, reqs))
 
 shutil.rmtree(home)
 print(f"\n{sum(results)}/{len(results)}")
