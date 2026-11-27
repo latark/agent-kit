@@ -688,6 +688,16 @@ check("config.worktree — ссылка → отказ", r and r[0] == "bad", r)
 os.unlink(os.path.join(MAIN, ".git", "config.worktree"))
 
 # --- deploy.sh: коммит из main по живому ответу GitHub, своя копия STATE (metis-0775, 0870, 0902) -----------------
+POLICY = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+os.makedirs(os.path.dirname(POLICY), exist_ok=True)
+
+
+def set_policy(*repos):
+    with open(POLICY, "w", encoding="utf-8") as fh:
+        fh.write("[merge_repos]\nmetis-pantheon = [%s]\n" % ", ".join(f'"{r}"' for r in repos))
+
+
+set_policy("t/repo")
 COPY = os.path.join(STATE, "handoff", "deploy", "t__repo")
 marker = os.path.join(COPY, ".deployed-marker")
 ROLE_MARK = os.path.join(MAIN, ".deployed-marker")
@@ -725,6 +735,22 @@ commit_push("deploy.sh", 'echo deployed > "$PWD/.deployed-marker"\necho extra\n'
 run()
 check("deploy.sh сменился после заявки → снято без окна и без запуска", not ASKED and result(qdir(), rid)["state"] ==
       "dropped", result(qdir(), rid))
+
+# metis-1387: repo из origin вне [merge_repos] → отказ до своей копии и fetch, как у остальных путей
+reset()
+shutil.rmtree(COPY, ignore_errors=True)
+for name, repos in (("нет policy-списка", ()), ("другой репозиторий", ("t/other",)),
+                    ("то же имя у другого владельца", ("evil/repo",))):
+    set_policy(*repos)
+    r = refused(H.facts_deploy, "~/projects/repo")
+    check(f"[1387] deploy, {name} → отказ, копия STATE не создана",
+          r and r[0] == "bad" and "merge_repos" in r[1] and not os.path.exists(COPY), (r, os.path.exists(COPY)))
+    rc, rid, out = touch("deploy", "~/projects/repo", "--task", "metis-1387")
+    check(f"[1387] заявка deploy, {name} → код не 0, заявки нет", rc != 0 and not rid, (rc, rid, out))
+set_policy("T/Repo")
+check("[1387] список без учёта регистра → deploy проходит", refused(H.facts_deploy, "~/projects/repo") is None)
+set_policy("t/repo")
+shutil.rmtree(COPY, ignore_errors=True)
 
 r = refused(H.facts_deploy, "~/projects/repo-wt")
 check("deploy из worktree → отказ", r and r[0] == "bad" and "worktree" in r[1], r)

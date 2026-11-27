@@ -637,6 +637,9 @@ def facts_deploy(target):
         repo = github_repo(g["keys"].get("remote.origin.url"))
     if not HEX40.fullmatch(head):
         raise Refuse("bad", "HEAD основной копии — не sha коммита")
+    allowed = P.merge_mod().allowed_repos() if P is not None else set()
+    if repo.lower() not in allowed:   # как остальные пути (metis-1387): чужой origin не получает ни fetch, ни окно
+        raise Refuse("bad", f"{repo} не из [merge_repos] в policy.toml — deploy только репозитория из списка")
     d, env = deploy_copy(repo)
     in_main(repo, d, env, head, fetch_main(repo, d, env))
     tree = run_git(["ls-tree", head, "--", "deploy.sh"], env, d).decode("utf-8", "replace").strip()

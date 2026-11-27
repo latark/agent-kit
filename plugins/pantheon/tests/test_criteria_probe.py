@@ -484,12 +484,24 @@ def scen_released(R, tmp):
     def got(versions, repo):
         catalog(tmp, versions)
         return R.plugins_released(repo)
+    def put_repo(repo):
+        path = os.path.join(tmp, ".claude", "plugins", "known_marketplaces.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"agent-kit": {"source": {"source": "github", "repo": repo}}}, fh)
+
     return cases([
         ("released: репозиторий каталога — версии из releases.json",
          lambda: got({"pantheon": "0.11.357", "guard": "0.5.1"}, "LaTark/Agent-Kit") == {"pantheon": "0.11.357",
                                                                                          "guard": "0.5.1"}),
         ("released: другой репозиторий — None", lambda: got({"pantheon": "1"}, "latark/other") is None),
         ("released: нет releases.json — None", lambda: got(None, REPO) is None),
+        ("catalog_repo: source.repo установки, строчными (metis-1389)",
+         lambda: (catalog(tmp, None), R.catalog_repo())[1] == REPO.lower()),
+        ("catalog_repo: нет known_marketplaces — None",
+         lambda: (os.remove(os.path.join(tmp, ".claude", "plugins", "known_marketplaces.json")), R.catalog_repo())[1] is None),
+        *[(f"catalog_repo: source.repo {bad!r} — None", lambda bad=bad: (put_repo(bad), R.catalog_repo())[1] is None)
+          for bad in ("../x", "./x", "owner/..", "owner/.", "-o/x", ".o/x", "a/b/c")],
+        ("catalog_repo: o/.github — допустимо", lambda: (put_repo("o/.github"), R.catalog_repo())[1] == "o/.github"),
     ])
 
 

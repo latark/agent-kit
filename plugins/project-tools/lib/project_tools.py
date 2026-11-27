@@ -88,6 +88,11 @@ class PartlyWritten(Broken):
     """Запись оборвалась на середине: в сообщении — что уже записано."""
 
 
+def _as_dict(v):
+    """Не словарь в settings.json (строка, список, null) — пустой словарь, а не AttributeError (metis-1393)."""
+    return v if isinstance(v, dict) else {}
+
+
 def short(path):
     return path.replace(HOME, "~", 1) if path.startswith(HOME) else path
 
@@ -553,8 +558,8 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
                 p.changes.append(f".claude/settings.json: маркетплейс {mkt['name']} добавлен ({mkt['source']['repo']})")
                 if name not in p.missing:
                     p.missing.append(name)
-            elif mkt and (new_shared_markets[mkt["name"]] or {}).get("source") != mkt["source"]:
-                theirs = ((new_shared_markets[mkt["name"]] or {}).get("source") or {}).get("repo", "?")
+            elif mkt and (_as_dict(new_shared_markets[mkt["name"]]).get("source") != mkt["source"]):
+                theirs = _as_dict(_as_dict(new_shared_markets[mkt["name"]]).get("source")).get("repo", "?")
                 p.notes.append(f"{name}: маркетплейс {mkt['name']} в settings.json указывает на {theirs}, карта велит "
                                f"{mkt['source']['repo']} — не меняю")
             for key, val in (tool.get("env") or {}).items():

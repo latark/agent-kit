@@ -533,6 +533,14 @@ check("чужой source маркетплейса не меняется и за�
       fsh["extraKnownMarketplaces"]["googlechrome"]["source"]["repo"] == "someone/fork"
       and "не меняю" in r.stdout and "someone/fork" in r.stdout, r.stdout)
 
+# metis-1393: значение маркетплейса или его source в settings.json — не словарь: заметка, а не AttributeError
+for i, bad in enumerate(("строка", ["список"], {"source": "строка"}, {"source": ["список"]})):
+    odd = project(home, f"extodd{i}", {"extension/manifest.json": {"manifest_version": 3},
+                                       ".claude/settings.json": {"extraKnownMarketplaces": {"googlechrome": bad}}})
+    r = run(home, "apply", "--dir", odd)
+    check(f"маркетплейс не словарь ({json.dumps(bad, ensure_ascii=False)}): код 0, без трассы, заметка есть",
+          r.returncode == 0 and "Traceback" not in r.stderr and "не меняю" in r.stdout, (r.returncode, r.stdout, r.stderr))
+
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
       all(t in MAP["tools"] for st in MAP["stacks"] for t in st["tools"]))

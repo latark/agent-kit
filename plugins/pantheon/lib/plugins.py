@@ -16,7 +16,7 @@ __all__ = [
     "_unchecked_path", "verified_write", "_plugins_journal", "_version_newer", "_plugins_installed", "_catalog_root",
     "_plugins_catalog", "_plugins_respawn_mark", "_plugin_install", "plugins_update", "_memory_pressure",
     "_current_sync", "_release_problem", "_gh_bin", "_main_ci_check", "_plugins_update", "plugins_accept",
-    "plugins_cmd", "plugins_released",
+    "plugins_cmd", "plugins_released", "catalog_repo",
 ]
 
 
@@ -98,6 +98,16 @@ def _catalog_root():
     if not isinstance(loc, str) or not os.path.isdir(loc):
         loc = os.path.join(P.HOME, ".claude", "plugins", "marketplaces", P.MARKETPLACE)
     return os.path.realpath(loc)
+
+
+def catalog_repo():
+    """owner/repo каталога agent-kit этой установки (source.repo в known_marketplaces.json), строчными; нет записи или
+    не GitHub-репозиторий — None: владельца из кода не берём (metis-1389)."""
+    entry = _known_entry()
+    src = entry.get("source") if entry else None
+    repo = str(src.get("repo") or "").strip().lower() if isinstance(src, dict) else ""
+    # владелец — буква/цифра в начале; имя репозитория может начинаться с точки (.github), но не "." и не ".."
+    return repo if re.fullmatch(r"[a-z0-9][a-z0-9-]*/(?!\.{1,2}$)[a-z0-9_.-]+", repo) else None
 
 
 def plugins_released(repo):
