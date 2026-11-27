@@ -493,6 +493,34 @@ try:
                 got = dict(P.take_start_requests(doms, P.now()))
                 check(f"1409 проход: заявка Гестии из кэша окна, {why} → отклонена с тревогой, файл снят",
                       not calls and "отклонена" in alerts_text()[a0:] and not os.path.exists(wreq_h), (calls, got))
+            # metis-1422: окно направления даёт Гестии только задачи metis-pantheon или hq — по полю и по папке
+            adir = os.path.join(P.PANTHEON, "directions", "athena-x", "tasks")
+            os.makedirs(adir, exist_ok=True)
+            for tid, dname in (("athe-0001", "athena-x"), ("metis-0002", "metis-pantheon")):
+                with open(os.path.join(adir, tid + ".md"), "w", encoding="utf-8") as fh:
+                    fh.write(f"---\ntype: task\nid: {tid}\ntitle: \"Своя карточка окна\"\nstatus: todo\nproject: X\n"
+                             f"direction: {dname}\nowner: hestia\ncreated: 2026-11-12\nupdated: 2026-11-12T16:00:00\n"
+                             "schema_version: 1\n---\n\n# Своя карточка окна\n")
+            for tid, why in (("athe-0001", "задача чужого направления"), ("metis-0002", "direction metis-pantheon, "
+                                                                          "а карточка в чужой папке tasks/")):
+                word(60)
+                with open(wreq_h, "w") as fh:
+                    fh.write(json.dumps({"target": "hestia", "time": P.stamp(P.now()), "by": "metis-pantheon",
+                                         "task": tid}) + "\n")
+                del calls[:]
+                a0 = len(alerts_text())
+                got = dict(P.take_start_requests(doms, P.now()))
+                check(f"1422 проход: заявка Гестии из кэша окна, {why} → отклонена с тревогой, Гестия не зовётся",
+                      not calls and "не из metis-pantheon или hq" in alerts_text()[a0:] and not os.path.exists(wreq_h),
+                      (calls, got, alerts_text()[a0:]))
+            word(60)
+            with open(wreq_h, "w") as fh:
+                fh.write(json.dumps({"target": "hestia", "time": P.stamp(P.now()), "by": "metis-pantheon",
+                                     "task": "metis-0001"}) + "\n")
+            del calls[:]
+            got = dict(P.take_start_requests(doms, P.now()))
+            check("1422 проход: заявка Гестии из кэша окна на задачу metis-pantheon — поднимается, как прежде",
+                  calls == ["metis-0001"], (calls, got))
         finally:
             G["_hestia_by_request"] = real
 

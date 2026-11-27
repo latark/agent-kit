@@ -847,7 +847,8 @@ def _hestia_window_mark(tid):
 
 def _take_window_hestia(t):
     """Плановый проход (metis-1409): заявки Гестии из окон ролей — <кэш окна>/start-req/hestia.req. by — имя папки
-    кэша, слово владельца и свежесть — как у заявки Зевса; иначе тревога без запуска. Файл снимается всегда."""
+    кэша, слово владельца и свежесть — как у заявки Зевса, задача — только metis-pantheon или hq (_hestia_task_problem,
+    metis-1422); иначе тревога без запуска. Файл снимается всегда."""
     base = os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox")
     out = []
     try:
@@ -869,7 +870,7 @@ def _take_window_hestia(t):
             if not bad:
                 items, bad = _req_items(data, HESTIA, by=w)
             if not bad:
-                bad = _req_word_problem(items, t)
+                bad = _req_word_problem(items, t) or _hestia_task_problem(items[-1]["task"])
             if bad:
                 P.alert(f"заявка окна {w} на Гестию отклонена: {bad}", "watch")
                 out.append((HESTIA, bad))
@@ -878,6 +879,22 @@ def _take_window_hestia(t):
         finally:
             os.close(dfd)
     return out
+
+
+HESTIA_WINDOW_DIRECTIONS = ("metis-pantheon", "hq")  # metis-1422: чьи задачи окно направления может дать Гестии
+
+
+def _hestia_task_problem(tid):
+    """metis-1422: заявка окна направления поднимает Гестию (права шире окна) только на задачу metis-pantheon или hq —
+    и по полю direction, и по папке карточки directions/<направление>/tasks. Своя карточка окна в своих tasks/ —
+    отказ: ваше слово к задаче не привязано. → причина отказа или None."""
+    path, head, _ = P.tasks_mod().load_tasks(P.PANTHEON).get(tid) or (None, None, None)
+    d = head.get("direction") if head else None
+    if d not in HESTIA_WINDOW_DIRECTIONS or os.path.dirname(os.path.realpath(path)) != \
+            os.path.realpath(os.path.join(P.PANTHEON, "directions", d, "tasks")):
+        return (f"задача {tid} не из {' или '.join(HESTIA_WINDOW_DIRECTIONS)} (направление {d or 'не найдено'}) — "
+                "Гестию по заявке окна поднимают только на них")
+    return None
 
 
 def _hestia_by_request(tid, who="заявка Зевса"):
