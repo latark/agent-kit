@@ -135,10 +135,12 @@ try:
     inactive = {"MANAGED_FILE": os.path.join(root, "нет-managed.json"), "MARKET_GUARD": market}
     strict_dir = os.path.join(home, ".local", "state", "pantheon", "guard-strict")
 
-    def probe(argv, event, conf=None, window=None, raw=None):
+    def probe(argv, event, conf=None, window=None, raw=None, branch=None):
         e = dict(env)
         if window is not None:
             e["PANTHEON_WINDOW"] = window
+        if branch is not None:
+            e["GUARD_BRANCH"] = branch
         data = raw if raw is not None else json.dumps(event)
         r = subprocess.run([sys.executable, "-I", "-c", PROBE, GUARD, json.dumps({"argv": argv, "set": conf or {}})],
                            input=data, capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT)
@@ -165,6 +167,15 @@ try:
     check("плагин, управляемые настройки, PostToolUse — не молчит (журнал запора слияния)", ran(r), r)
     r = probe([], pre("Bash"), inactive)
     check("плагин без управляемых настроек — проверяет", ran(r), r)
+    # GUARD_BRANCH=1 (metis-1227): проба guard ветки через --plugin-dir — плагин не молчит при управляемых
+    for tool, ev in (("Bash", pre("Bash")), ("Stop", {"hook_event_name": "Stop", "session_id": "s-entry-0001"})):
+        r = probe([], ev, active, branch="1")
+        check(f"GUARD_BRANCH=1, плагин при управляемых, {tool} — проверяет сам", ran(r), r)
+    for val in ("0", ""):
+        r = probe([], pre("Bash"), active, branch=val)
+        check(f"GUARD_BRANCH={val!r} (не 1) — плагин при управляемых молчит, как без флага", quiet(r), r)
+    r = probe(["--managed"], pre("Bash"), active, branch="1")
+    check("GUARD_BRANCH=1, --managed — проверяет, как и без флага", ran(r), r)
     for mode in (["--managed"], ["--strict"]):
         r = probe(mode, pre("Bash"), active)
         check(f"{mode[0]} при управляемых настройках — проверяет (молчит только плагин)", ran(r), r)
@@ -199,6 +210,8 @@ try:
     r2 = probe([], pre("Bash", sid), inactive, window="w1")
     check("строгий обновил метку повторным вызовом — плагин снова молчит",
           ran(r) and quiet(r2) and os.stat(marker).st_mtime > time.time() - 60, (r, r2))
+    r = probe([], pre("Bash", sid), inactive, window="w1", branch="1")
+    check("GUARD_BRANCH=1 при свежей метке строгого — плагин проверяет сам (metis-1227)", ran(r), r)
     r = probe([], pre("Read", sid), inactive, window="w1")
     check("плагин, инструмент, который строгий ещё не проверял (Read), — проверяет", ran(r), r)
     r = probe([], pre("Bash", sid), inactive, window="w2")
