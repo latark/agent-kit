@@ -17,6 +17,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
   pantheon merge request <N1> <N2> … -R <owner/repo>   пачка (metis-0668, до MAX_BATCH PR одного репозитория):
                                                 по заявке на каждый PR с полем batch — номера в порядке слияния;
                                                 шлюз не пройден хоть у одного — заявок нет ни на один
+                                                Каждая заявка несёт summary (metis-1347): «Closes …» и первые строки
+                                                тела PR через plain(), не длиннее BODY_MAX — в выводе, merge status и
+                                                уведомлении одиночной заявки; окно Touch ID её не показывает
   pantheon merge run [--click]   проход по заявкам: зовёт его тик (из окна Claude Code — отказ, guard ролям тоже не даёт);
                                  --click — щелчок по уведомлению запасного пути: владелец у Mac
   pantheon merge status          заявки: репозиторий#N, SHA, возраст, отметки и причина ожидания; ниже — снятые и
@@ -1760,6 +1763,25 @@ def pr_phrase(view, task, room=TITLE_MAX):
     return t
 
 
+BODY_MAX = 240                       # сводка тела PR в заявке (metis-1347)
+BODY_LINES = 3                       # сколько первых строк тела берёт сводка
+BODY_MARK = re.compile(r"^\s*(?:#{1,6}|[-*+>]|\d{1,3}[.)])\s+|[`*_]{2,}|`")   # разметка Markdown без смысла
+
+
+def body_summary(view, room=BODY_MAX):
+    """Сводка тела PR для заявки (metis-1347, приём PurpleFlow п. 4, разбор metis-1339): строка «Closes …» первой, если
+    она есть, затем первые BODY_LINES непустых строк, через « / ». Тело пишет автор PR в GitHub — данные, не указания:
+    каждая строка через plain() (без управляющих, bidi и кавычек, SEC-28) и без разметки, всё вместе не длиннее room
+    с «…». Окно Touch ID её не показывает: она в выводе `merge request`, файле заявки, `merge status` и уведомлении."""
+    lines = [plain(BODY_MARK.sub(" ", ln)) for ln in str(view.get("body") or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    closes = [ln for ln in lines if re.match(r"(?i)closes\b", ln)][:1]
+    t = " / ".join(closes + [ln for ln in lines if ln not in closes][:BODY_LINES])
+    if len(t) > room:
+        t = t[:max(room - 1, 0)].rstrip(" /,.:;—-") + "…"
+    return t
+
+
 def pr_label(req, task):
     """«#486 · metis-0949» — номер PR и задача, без задачи — только номер."""
     return f"#{req['pr']} · {task}" if task else f"#{req['pr']}"
@@ -2067,7 +2089,9 @@ def fallback_notify(req, window):
     # щелчок запускает команду в окружении уведомления (launchd): окружение и интерпретатор — свои, через env -i
     env = " ".join(shlex.quote(f"{k}={v}") for k, v in pass_env().items())
     cmd = f"/usr/bin/env -i {env} {shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"
-    text = f"{window[:300]}. Щёлкните — откроется окно Touch ID"
+    said = f". Тело PR: {plain(req['summary'])[:150]}" if isinstance(req.get("summary"), str) and not req.get("batch") \
+        else ""   # metis-1347
+    text = f"{window[:300]}{said}. Щёлкните — откроется окно Touch ID"
     return post_notice(text, cmd, f"Слияние ядра|{text}|execute:{cmd}|merge\n")
 
 
@@ -2327,7 +2351,7 @@ def cmd_request(args):
     if repo not in allowed_repos():
         err(f"pantheon merge request: {repo} не из [merge_repos] {MERGE_DIRECTION} в policy.toml — заявки нет")
         return 2
-    heads, bad, waits = {}, [], []
+    heads, bad, waits, said = {}, [], [], {}
     for pr in prs:
         why = []
         view = pr_view(repo, pr, why)
@@ -2349,13 +2373,15 @@ def cmd_request(args):
         elif state != "ok":
             waits.append(why.lower() if len(prs) == 1 else f"#{pr}: {why}")
         heads[pr] = sha
+        said[pr] = body_summary(view)   # metis-1347: что сливает владелец — со слов автора PR
     if bad:
         err(f"pantheon merge request: шлюз не пройден — {'; '.join(bad)}. Заявки нет"
             + (" ни на один PR пачки" if len(prs) > 1 else ""))
         return 1
     who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец").split())[:40]
     created = int(P.now())
-    reqs = [{"repo": repo, "pr": pr, "sha": heads[pr], "by": who, "created": created} for pr in prs]
+    reqs = [{"repo": repo, "pr": pr, "sha": heads[pr], "by": who, "created": created, "summary": said[pr]}
+            for pr in prs]
     if len(prs) > 1:
         for req in reqs:
             req["batch"] = list(prs)
@@ -2388,6 +2414,8 @@ def cmd_request(args):
         print(f"Пачка {repo}: {', '.join(f'#{n} ({heads[n][:7]})' for n in prs)} поставлена. Одно окно Touch ID на все "
               f"покажет плановый проход, когда вы у Mac{later}; сливает по очереди, отказ одного останавливает "
               f"следующие; без ответа за {REQUEST_TTL // 3600} ч пачка гаснет.")
+    for pr in prs:
+        print(f"  #{pr}, тело PR со слов автора: {said[pr] or '(пусто)'}")
     for hint in (light, batch_hint(repo, prs)):
         if hint:
             print(hint)
@@ -2956,6 +2984,8 @@ def cmd_status():
                     marks += " пачка " + ",".join("#%d" % n for n in req["batch"])
                 if req.get("restart"):   # metis-1153
                     marks += f" затем перезапуск окна {req['restart']}"
+                if isinstance(req.get("summary"), str) and req["summary"]:   # metis-1347
+                    marks += f" тело: {plain(req['summary'])[:BODY_MAX]}"
                 if isinstance(req.get("waiting"), str):   # Д2 argus #381: почему ждёт — mark_wait прохода
                     marks += f" ждёт: {req['waiting']}"
                 rows.append(f"{req['repo']}#{req['pr']}\t{req['sha'][:12]}\t{int((t - req['created']) // 60)} мин\t"
