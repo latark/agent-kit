@@ -200,9 +200,10 @@ def main(rest, pantheon, T, t=None):
     return 0
 
 
-def plans(pantheon, t):
+def plans(pantheon, t, unread=None):
     """Планы для прохода доски → [(путь, направление)]: поле plans направления в directions.toml, без него — свежие
-    directions/<имя>/plan-*.md с разделами-пачками."""
+    directions/<имя>/plan-*.md с разделами-пачками. unread — множество: сюда попадает направление, у которого план
+    не прочитался (metis-1394), чтобы вызывающий не счёл пачки из него «вне плана»."""
     try:
         with open(os.path.join(pantheon, "directions.toml"), "rb") as fh:
             reg = tomllib.load(fh) if tomllib else {}
@@ -234,6 +235,8 @@ def plans(pantheon, t):
                 if t - os.stat(p).st_mtime > PLAN_FRESH or not sections(_read(p)):
                     continue
             except (OSError, UnicodeDecodeError):
+                if unread is not None:
+                    unread.add(name)
                 continue
             out.append((p, name))
     return out
@@ -262,17 +265,19 @@ def uncovered_packs(pantheon, tasks, t, T):
     """Открытые пачки (story, не цели) направлений, у которых есть план, а раздела-пачки с ними нет → [id] (metis-1378).
     Раздел покрывает пачку, если его карточка найдена (ссылка, поле story/пачка или имя в «ёлочках»). Направление без
     плана не в счёт: сверять не с чем. План не прочитан — направление пропущено, а не «всё вне плана»."""
-    covered, planned = set(), set()
-    for path, name in plans(pantheon, t):
+    covered, planned, unread = set(), set(), set()
+    for path, name in plans(pantheon, t, unread):
         try:
             secs = sections(_read(path))
         except (OSError, UnicodeDecodeError):
+            unread.add(name)
             continue
         planned.add(name)
         for sec in secs:
             sid = sec["story"] or _story_by_name(sec, tasks)
             if sid:
                 covered.add(sid)
+    planned -= unread  # хоть один план направления не прочитан — его пачки могли быть там (metis-1394)
     return sorted(sid for sid, (_, h, _) in tasks.items()
                   if h.get("type") == "story" and h.get("status") not in CLOSED and h.get("direction") in planned
                   and sid not in covered and not T.is_goal(sid, tasks))

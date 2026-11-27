@@ -285,6 +285,37 @@ def part_tick_race():
     shutil.rmtree(tmp, True)
 
 
+def part_check_error():
+    """metis-1395: сбой сверки пачек с планом при ручном check — строка с классом исключения в stderr, check идёт дальше."""
+    import contextlib
+    import io
+    tmp, home, state, env = make(stories=False)
+    put(home, "metis-9301", "Старая без пачки", "x", created="2026-11-05")
+    for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE", "PANTHEON_VIEW", "PANTHEON_HOST", "PANTHEON_NOW", "PANTHEON_DRYRUN",
+              "PANTHEON_NO_NOTIFY"):
+        os.environ[k] = env[k]
+    import pantheon as P
+    err, out = io.StringIO(), io.StringIO()
+
+    def boom(_name):
+        raise RuntimeError("план сломан")
+    real = P._plugin_map_mod
+    P._plugin_map_mod = boom
+    try:
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            ids = P.check_no_parent(P.tasks_mod(), False)
+        quiet_err = io.StringIO()
+        with contextlib.redirect_stderr(quiet_err), contextlib.redirect_stdout(io.StringIO()):
+            P.check_no_parent(P.tasks_mod(), True)
+    finally:
+        P._plugin_map_mod = real
+    check("check руками: сбой uncovered_packs — в stderr строка с классом «RuntimeError», check не падает, ids прежние",
+          "RuntimeError" in err.getvalue() and "сверка пачек с планом не вышла" in err.getvalue() and ids == ["metis-9301"],
+          err.getvalue() + str(ids))
+    check("check --quiet (тик): сбой сверки не пишет в stderr", quiet_err.getvalue() == "", quiet_err.getvalue())
+    shutil.rmtree(tmp, True)
+
+
 def main():
     part_new()
     part_pure()
@@ -293,6 +324,7 @@ def main():
     part_many()
     part_tick()
     part_tick_race()
+    part_check_error()
     print(f"\n{sum(results)}/{len(results)}")
     sys.exit(0 if all(results) else 1)
 

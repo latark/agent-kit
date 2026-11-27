@@ -7,6 +7,7 @@ hestia, лид направления без координатора), свеж
 pantheon._attach до выполнения этого файла, имена из __all__ становятся именами pantheon.
 """
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -267,8 +268,11 @@ def _fresh_start(name, a, text, origin, reason=None, goal=None, resume=None):
         why = copies_message(name, live)
         P.start_log(f"fresh-tab\t{name}\t{origin}")
         # metis-1025: окно во вкладке терминала держится часами — повтор каждый проход (28 строк за 3 дня) → строка в сутки
-        P.alert_fold(f"fresh-tab-{name}", f"{name}: свежий старт не сделан — {why}", "pantheon")
+        # ключ — с причиной (metis-1397): другая причина за сутки — своя строка, а не «повторы» прежней
+        P.alert_fold(f"fresh-tab-{name}-{hashlib.sha1(why.encode()).hexdigest()[:8]}",
+                     f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
+    P.alert_fold_clear(f"fresh-tab-{name}-")  # вкладки нет — причина ушла, счётчик не тянем в следующий раз (metis-1396)
     stopped = list(live)
     P.stop_copies(name, live, "stop-fresh")
     for x in agents:  # закончившая ход с живым процессом держит имя (CTX-10)
