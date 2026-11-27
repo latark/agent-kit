@@ -928,8 +928,9 @@ def net_error(text):
 def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
     """Тревога о сетевом сбое только когда он держится n проходов подряд (metis-1381, 1386): разовый обрыв gh или fetch
     раньше давал строку на каждый всплеск (alert_once снимается на первом успехе). Счётчик — STATE/once/streak-<key>;
-    bad=False сбрасывает его; count=False (лёгкий тик по кэшу, который не ходит в сеть) счёт не растит. Строка — через
-    alert_fold по ключу: пока сбой держится, не чаще раза в сутки со счётчиком повторов. True — строка записана."""
+    bad=False сбрасывает его; count=False (лёгкий тик по кэшу, который не ходит в сеть) счёт не меняет — ни растит, ни
+    сбрасывает (metis-1402, 1406): серию ведёт только сетевой проход. Строка — через alert_fold по ключу: пока сбой
+    держится, не чаще раза в сутки со счётчиком повторов. True — строка записана."""
     mark = once_path("streak-" + key)
     try:
         with open(mark, encoding="utf-8") as fh:
@@ -937,7 +938,7 @@ def alert_streak(key, bad, text, who="pantheon", n=ALERT_STREAK, count=True):
     except (OSError, ValueError):
         c = 0
     if not bad:
-        if c:
+        if c and count:
             clear_once("streak-" + key)
         return False
     if count:
